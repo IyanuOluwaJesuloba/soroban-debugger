@@ -67,8 +67,7 @@ impl Stepper {
         self.step_mode = StepMode::StepOver;
         debug_state.start_instruction_stepping(StepMode::StepOver);
 
-        // Find next instruction at same or lower call depth
-        self.find_next_instruction_at_depth(debug_state)
+        debug_state.next_instruction().is_some()
     }
 
     /// Step out of current function
@@ -163,23 +162,7 @@ impl Stepper {
         false // Continue execution
     }
 
-    /// Find next instruction at same or lower call depth
-    fn find_next_instruction_at_depth(&self, debug_state: &mut DebugState) -> bool {
-        let target_depth = debug_state.instruction_pointer().call_stack_depth();
-
-        // Simulate stepping through instructions to find the right depth
-        for _ in 0..1000 {
-            // Prevent infinite loop
-            if debug_state.next_instruction().is_none() {
-                break;
-            }
-            if debug_state.instruction_pointer().call_stack_depth() <= target_depth {
-                return true;
-            }
-        }
-
-        false
-    }
+    // Removed find_next_instruction_at_depth
 
     /// Find next instruction at lower call depth (step out)
     fn find_next_instruction_at_lower_depth(&self, debug_state: &mut DebugState) -> bool {

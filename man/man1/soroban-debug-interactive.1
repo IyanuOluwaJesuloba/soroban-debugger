@@ -4,7 +4,7 @@
 .SH NAME
 interactive \- Start an interactive debugging session
 .SH SYNOPSIS
-\fBinteractive\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-\-network\-snapshot\fR] [\fB\-\-expected\-hash\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBinteractive\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-\-network\-snapshot\fR] <\fB\-f\fR|\fB\-\-function\fR> [\fB\-a\fR|\fB\-\-args\fR] [\fB\-s\fR|\fB\-\-storage\fR] [\fB\-\-import\-storage\fR] [\fB\-b\fR|\fB\-\-breakpoint\fR] [\fB\-\-mock\fR] [\fB\-\-timeout\fR] [\fB\-\-instruction\-debug\fR] [\fB\-\-step\-instructions\fR] [\fB\-\-step\-mode\fR] [\fB\-\-expected\-hash\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Start an interactive debugging session
 .SH OPTIONS
@@ -14,6 +14,36 @@ Path to the contract WASM file
 .TP
 \fB\-\-network\-snapshot\fR \fI<NETWORK_SNAPSHOT>\fR
 Network snapshot file to load before starting interactive session
+.TP
+\fB\-f\fR, \fB\-\-function\fR \fI<FUNCTION>\fR
+Function name to execute (staged; use \*(Aqcontinue\*(Aq inside the session)
+.TP
+\fB\-a\fR, \fB\-\-args\fR \fI<ARGS>\fR
+Function arguments as JSON array (e.g., \*(Aq["arg1", "arg2"]\*(Aq)
+.TP
+\fB\-s\fR, \fB\-\-storage\fR \fI<STORAGE>\fR
+Initial storage state as JSON object
+.TP
+\fB\-\-import\-storage\fR \fI<IMPORT_STORAGE>\fR
+Import storage state from JSON file before starting the session
+.TP
+\fB\-b\fR, \fB\-\-breakpoint\fR \fI<BREAKPOINT>\fR
+Set breakpoint at function name
+.TP
+\fB\-\-mock\fR \fI<CONTRACT_ID.function=return_value>\fR
+Mock cross\-contract return: CONTRACT_ID.function=return_value (repeatable)
+.TP
+\fB\-\-timeout\fR \fI<TIMEOUT>\fR [default: 30]
+Execution timeout in seconds (default: 30)
+.TP
+\fB\-\-instruction\-debug\fR
+Enable instruction\-level debugging
+.TP
+\fB\-\-step\-instructions\fR
+Start with instruction stepping enabled
+.TP
+\fB\-\-step\-mode\fR \fI<STEP_MODE>\fR [default: into]
+Step mode for instruction debugging (into, over, out, block)
 .TP
 \fB\-\-expected\-hash\fR \fI<EXPECTED_HASH>\fR
 Expected SHA\-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match

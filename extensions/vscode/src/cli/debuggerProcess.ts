@@ -38,7 +38,9 @@ type DebugRequest =
   | { type: 'Authenticate'; token: string }
   | { type: 'LoadContract'; contract_path: string }
   | { type: 'Execute'; function: string; args?: string }
-  | { type: 'Step' }
+  | { type: 'StepIn' }
+  | { type: 'Next' }
+  | { type: 'StepOut' }
   | { type: 'Continue' }
   | { type: 'Inspect' }
   | { type: 'GetStorage' }
@@ -161,9 +163,22 @@ export class DebuggerProcess {
     };
   }
 
-  async step(): Promise<void> {
-    const response = await this.sendRequest({ type: 'Step' });
+  async stepIn(): Promise<{ paused: boolean; current_function?: string; step_count: number }> {
+    const response = await this.sendRequest({ type: 'StepIn' });
     this.expectResponse(response, 'StepResult');
+    return response as any;
+  }
+
+  async next(): Promise<{ paused: boolean; current_function?: string; step_count: number }> {
+    const response = await this.sendRequest({ type: 'Next' });
+    this.expectResponse(response, 'StepResult');
+    return response as any;
+  }
+
+  async stepOut(): Promise<{ paused: boolean; current_function?: string; step_count: number }> {
+    const response = await this.sendRequest({ type: 'StepOut' });
+    this.expectResponse(response, 'StepResult');
+    return response as any;
   }
 
   async continueExecution(): Promise<DebuggerContinueResult> {

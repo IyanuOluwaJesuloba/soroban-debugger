@@ -379,9 +379,15 @@ export class SorobanDebugSession extends DebugSession {
         return;
       }
 
-      const result = await this.debuggerProcess.continueExecution();
-      if (result.output) {
-        this.sendEvent(new LogOutputEvent(`Result: ${result.output}\n`, LogLevel.Log));
+      let result;
+      if (label === 'next') {
+        result = await this.debuggerProcess.next();
+      } else if (label === 'step in') {
+        result = await this.debuggerProcess.stepIn();
+      } else if (label === 'step out') {
+        result = await this.debuggerProcess.stepOut();
+      } else {
+        result = await this.debuggerProcess.stepIn(); // Fallback
       }
 
       if (result.paused) {
@@ -444,13 +450,36 @@ export class SorobanDebugSession extends DebugSession {
       this.debuggerProcess.getStorage()
     ]);
 
-    this.state.callStack = inspection.callStack.map((frame, index) => ({
-      id: index + 1,
-      name: frame,
-      source: frame,
-      line: 1,
-      column: 1
-    }));
+    this.state.callStack = inspection.callStack.map((frame, index) => {
+      let sourcePath = frame;
+      let line = 1;
+
+      // Try to find the range for the function to resolve the actual source line
+      for (const [sourceFilePath, sourceBpSet] of this.sourceFunctionBreakpoints.entries()) {
+        if (sourceBpSet.has(frame) || sourceFilePath) {
+          sourcePath = sourceFilePath;
+          try {
+            const { parseFunctionRanges } = require('./sourceBreakpoints');
+            const ranges = parseFunctionRanges(sourcePath);
+            const range = ranges.find((r: any) => r.name === frame);
+            if (range) {
+              line = range.startLine;
+            }
+          } catch (e) {
+            // Ignore if parseFunctionRanges fails
+          }
+          break; // Stop looking after the first match
+        }
+      }
+
+      return {
+        id: index + 1,
+        name: frame,
+        source: sourcePath,
+        line: line,
+        column: 1
+      };
+    });
     this.state.args = inspection.args;
     this.state.variables = this.storageToVariables(storage);
   }

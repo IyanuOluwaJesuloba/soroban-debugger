@@ -169,19 +169,20 @@ fn test_call_stack_tracking() {
 
     let mut ip = InstructionPointer::new();
 
-    let call_inst = Instruction::new(
-        0x100,
-        wasmparser::Operator::Call { function_index: 1 },
-        0,
-        0,
-    );
-
-    ip.update_call_stack(&call_inst);
+    // Simulate jumping into a call
+    ip.push_return_address(10);
     assert_eq!(ip.call_stack_depth(), 1);
 
-    let return_inst = Instruction::new(0x200, wasmparser::Operator::Return, 1, 10);
+    let mut block_inst = Instruction::new(0x100, wasmparser::Operator::Block { blockty: wasmparser::BlockType::Empty }, 1, 0);
+    ip.update_call_stack(&block_inst);
+    assert_eq!(ip.block_depth(), 1);
 
-    ip.update_call_stack(&return_inst);
+    let end_inst = Instruction::new(0x200, wasmparser::Operator::End, 1, 10);
+    ip.update_call_stack(&end_inst);
+    assert_eq!(ip.block_depth(), 0);
+    assert_eq!(ip.call_stack_depth(), 1); // Depth still 1 until we pop
+
+    ip.pop_return_address();
     assert_eq!(ip.call_stack_depth(), 0);
 }
 

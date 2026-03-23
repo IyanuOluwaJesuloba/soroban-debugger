@@ -154,9 +154,11 @@ impl DebugServer {
                     message: "Already authenticated".to_string(),
                 },
                 DebugRequest::LoadContract { contract_path } => match fs::read(&contract_path) {
-                    Ok(bytes) => match crate::runtime::executor::ContractExecutor::new(bytes) {
+                    Ok(bytes) => match crate::runtime::executor::ContractExecutor::new(bytes.clone()) {
                         Ok(executor) => {
-                            self.engine = Some(DebuggerEngine::new(executor, Vec::new()));
+                            let mut engine = DebuggerEngine::new(executor, Vec::new());
+                            let _ = engine.enable_instruction_debug(&bytes);
+                            self.engine = Some(engine);
                             self.pending_execution = None;
                             DebugResponse::ContractLoaded {
                                 size: fs::metadata(&contract_path)
@@ -212,8 +214,62 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::Step => match self.engine.as_mut() {
-                    Some(engine) => match engine.step() {
+                DebugRequest::StepIn => match self.engine.as_mut() {
+                    Some(engine) => match engine.step_into() {
+                        Ok(_) => {
+                            let (current_function, step_count) = engine
+                                .state()
+                                .lock()
+                                .map(|state| {
+                                    (
+                                        state.current_function().map(|s| s.to_string()),
+                                        state.step_count() as u64,
+                                    )
+                                })
+                                .unwrap_or((None, 0));
+                            DebugResponse::StepResult {
+                                paused: engine.is_paused(),
+                                current_function,
+                                step_count,
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::Next => match self.engine.as_mut() {
+                    Some(engine) => match engine.step_over() {
+                        Ok(_) => {
+                            let (current_function, step_count) = engine
+                                .state()
+                                .lock()
+                                .map(|state| {
+                                    (
+                                        state.current_function().map(|s| s.to_string()),
+                                        state.step_count() as u64,
+                                    )
+                                })
+                                .unwrap_or((None, 0));
+                            DebugResponse::StepResult {
+                                paused: engine.is_paused(),
+                                current_function,
+                                step_count,
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
+                DebugRequest::StepOut => match self.engine.as_mut() {
+                    Some(engine) => match engine.step_out() {
                         Ok(_) => {
                             let (current_function, step_count) = engine
                                 .state()

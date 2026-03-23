@@ -16,8 +16,14 @@ pub enum DebugRequest {
         args: Option<String>,
     },
 
-    /// Step execution
-    Step,
+    /// Step into next inline/instruction
+    StepIn,
+
+    /// Step over current function
+    Next,
+
+    /// Step out of current function
+    StepOut,
 
     /// Continue execution
     Continue,

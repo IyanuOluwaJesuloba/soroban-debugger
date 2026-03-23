@@ -21,8 +21,6 @@ pub enum StepMode {
 pub struct InstructionPointer {
     /// Current instruction index in the instruction list
     current_index: usize,
-    /// Stack depth for step over/out functionality
-    call_stack_depth: u32,
     /// History of previous instruction indices for back-stepping
     history: VecDeque<usize>,
     /// Maximum history size
@@ -33,6 +31,10 @@ pub struct InstructionPointer {
     step_mode: StepMode,
     /// Target depth for step out
     target_depth: Option<u32>,
+    /// Stack of return addresses for step-into WASM calls
+    return_stack: Vec<usize>,
+    /// Block depth for detecting end of function
+    block_depth: u32,
 }
 
 impl InstructionPointer {
@@ -40,12 +42,13 @@ impl InstructionPointer {
     pub fn new() -> Self {
         Self {
             current_index: 0,
-            call_stack_depth: 0,
             history: VecDeque::new(),
             max_history: 1000,
             stepping: false,
             step_mode: StepMode::StepInto,
             target_depth: None,
+            return_stack: Vec::new(),
+            block_depth: 0,
         }
     }
 
@@ -54,9 +57,9 @@ impl InstructionPointer {
         self.current_index
     }
 
-    /// Get current call stack depth
+    /// Get current call stack depth based on return stack
     pub fn call_stack_depth(&self) -> u32 {
-        self.call_stack_depth
+        self.return_stack.len() as u32
     }
 
     /// Check if currently stepping
@@ -76,11 +79,11 @@ impl InstructionPointer {
 
         match mode {
             StepMode::StepOver => {
-                self.target_depth = Some(self.call_stack_depth);
+                self.target_depth = Some(self.call_stack_depth());
             }
             StepMode::StepOut => {
-                self.target_depth = if self.call_stack_depth > 0 {
-                    Some(self.call_stack_depth - 1)
+                self.target_depth = if self.call_stack_depth() > 0 {
+                    Some(self.call_stack_depth() - 1)
                 } else {
                     None
                 };
@@ -120,13 +123,33 @@ impl InstructionPointer {
 
     /// Update call stack depth based on instruction
     pub fn update_call_stack(&mut self, instruction: &Instruction) {
-        if instruction.is_call() {
-            self.call_stack_depth += 1;
-        } else if matches!(instruction.operator, wasmparser::Operator::Return)
-            && self.call_stack_depth > 0
-        {
-            self.call_stack_depth -= 1;
+        match instruction.operator {
+            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } | wasmparser::Operator::If { .. } => {
+                self.block_depth += 1;
+            }
+            wasmparser::Operator::End => {
+                if self.block_depth > 0 {
+                    self.block_depth -= 1;
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// Push a return address
+    pub fn push_return_address(&mut self, index: usize) {
+        self.return_stack.push(index);
+        self.block_depth = 0; // Reset block depth for new function
+    }
+
+    /// Pop a return address
+    pub fn pop_return_address(&mut self) -> Option<usize> {
+        self.return_stack.pop()
+    }
+    
+    /// Get current block depth
+    pub fn block_depth(&self) -> u32 {
+        self.block_depth
     }
 
     /// Check if we should pause at this instruction based on step mode
@@ -138,15 +161,15 @@ impl InstructionPointer {
         match self.step_mode {
             StepMode::StepInto => true,
             StepMode::StepOver => {
-                // Pause if we're at the same depth or returned from a call
+                // Pause if we're at the same depth or returned
                 self.target_depth
-                    .map(|target| self.call_stack_depth <= target)
+                    .map(|target| self.call_stack_depth() <= target)
                     .unwrap_or(true)
             }
             StepMode::StepOut => {
                 // Pause if we've returned to target depth
                 if let Some(target) = self.target_depth {
-                    self.call_stack_depth <= target
+                    self.call_stack_depth() <= target
                 } else {
                     false
                 }
@@ -161,10 +184,11 @@ impl InstructionPointer {
     /// Reset to beginning
     pub fn reset(&mut self) {
         self.current_index = 0;
-        self.call_stack_depth = 0;
         self.history.clear();
         self.stepping = false;
         self.target_depth = None;
+        self.return_stack.clear();
+        self.block_depth = 0;
     }
 
     /// Get history size
@@ -262,14 +286,20 @@ mod tests {
     fn test_call_stack_tracking() {
         let mut ip = InstructionPointer::new();
 
-        let call_inst = Instruction::new(0x100, Operator::Call { function_index: 1 }, 0, 0);
-
-        ip.update_call_stack(&call_inst);
+        // Simulate jumping into a call
+        ip.push_return_address(10);
         assert_eq!(ip.call_stack_depth(), 1);
+        
+        let mut block_inst = Instruction::new(0x100, Operator::Block { blockty: wasmparser::BlockType::Empty }, 1, 0);
+        ip.update_call_stack(&block_inst);
+        assert_eq!(ip.block_depth(), 1);
 
-        let return_inst = Instruction::new(0x200, Operator::Return, 1, 10);
+        let end_inst = Instruction::new(0x200, Operator::End, 1, 10);
+        ip.update_call_stack(&end_inst);
+        assert_eq!(ip.block_depth(), 0);
+        assert_eq!(ip.call_stack_depth(), 1); // Depth still 1 until we pop
 
-        ip.update_call_stack(&return_inst);
+        ip.pop_return_address();
         assert_eq!(ip.call_stack_depth(), 0);
     }
 }

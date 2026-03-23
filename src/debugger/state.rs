@@ -118,7 +118,38 @@ impl DebugState {
     }
 
     pub fn next_instruction(&mut self) -> Option<&Instruction> {
-        let next_index = self.instruction_pointer.current_index().saturating_add(1);
+        let current_index = self.instruction_pointer.current_index();
+        let mut next_index = current_index.saturating_add(1);
+
+        if let Some(inst) = self.current_instruction.clone() {
+            // Check if it's a call and we are stepping into it
+            if inst.is_call() && self.instruction_pointer.step_mode() == StepMode::StepInto {
+                if let wasmparser::Operator::Call { function_index } = inst.operator {
+                    // Find target function
+                    if let Some((idx, _)) = self.instructions.iter().enumerate().find(|(_, i)| {
+                        i.function_index == function_index && i.local_index == 0
+                    }) {
+                        self.instruction_pointer.push_return_address(next_index);
+                        next_index = idx;
+                        
+                        // Push to active call stack for adapter.ts
+                        let next_func_name = format!("func_{}", function_index);
+                        self.call_stack_mut().push(next_func_name, None);
+                    }
+                }
+            } else if matches!(inst.operator, wasmparser::Operator::Return) || 
+                     (matches!(inst.operator, wasmparser::Operator::End) && self.instruction_pointer.block_depth() == 0) {
+                // Function end, return to caller
+                if let Some(ret_addr) = self.instruction_pointer.pop_return_address() {
+                    next_index = ret_addr;
+                    // Pop from active call stack
+                    if self.call_stack().get_stack().len() > 1 {
+                        self.call_stack_mut().pop();
+                    }
+                }
+            }
+        }
+        
         self.advance_to_instruction(next_index)
     }
 

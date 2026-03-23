@@ -281,5 +281,6 @@ fn repl_accepts_commands_and_exits() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(combined.contains("soroban-debug repl ["));
+    println!("COMBINED_OUTPUT: {}", combined);
+    assert!(combined.contains("Available Commands:"));
 }

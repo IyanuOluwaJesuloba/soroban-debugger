@@ -109,9 +109,9 @@ impl RemoteClient {
         }
     }
 
-    /// Step execution
-    pub fn step(&mut self) -> Result<(bool, Option<String>, u64)> {
-        let response = self.send_request(DebugRequest::Step)?;
+    /// Step into next inline/instruction
+    pub fn step_in(&mut self) -> Result<(bool, Option<String>, u64)> {
+        let response = self.send_request(DebugRequest::StepIn)?;
 
         match response {
             DebugResponse::StepResult {
@@ -121,7 +121,41 @@ impl RemoteClient {
             } => Ok((paused, current_function, step_count)),
             DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
             _ => {
-                Err(DebuggerError::ExecutionError("Unexpected response to Step".to_string()).into())
+                Err(DebuggerError::ExecutionError("Unexpected response to StepIn".to_string()).into())
+            }
+        }
+    }
+
+    /// Step over current function
+    pub fn step_over(&mut self) -> Result<(bool, Option<String>, u64)> {
+        let response = self.send_request(DebugRequest::Next)?;
+
+        match response {
+            DebugResponse::StepResult {
+                paused,
+                current_function,
+                step_count,
+            } => Ok((paused, current_function, step_count)),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => {
+                Err(DebuggerError::ExecutionError("Unexpected response to Next".to_string()).into())
+            }
+        }
+    }
+
+    /// Step out of current function
+    pub fn step_out(&mut self) -> Result<(bool, Option<String>, u64)> {
+        let response = self.send_request(DebugRequest::StepOut)?;
+
+        match response {
+            DebugResponse::StepResult {
+                paused,
+                current_function,
+                step_count,
+            } => Ok((paused, current_function, step_count)),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => {
+                Err(DebuggerError::ExecutionError("Unexpected response to StepOut".to_string()).into())
             }
         }
     }
@@ -149,6 +183,7 @@ impl RemoteClient {
                 step_count,
                 paused,
                 call_stack,
+                ..
             } => Ok((function, step_count, paused, call_stack)),
             DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
             _ => Err(
