@@ -1832,7 +1832,7 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
     let manager = HistoryManager::new()?;
     let mut records = manager.filter_history(contract, function)?;
 
-    records.sort_by(|a, b| a.date.cmp(&b.date));
+    crate::history::sort_records_by_date(&mut records);
 
     if records.is_empty() {
         if !Formatter::is_quiet() {
