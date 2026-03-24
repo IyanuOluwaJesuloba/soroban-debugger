@@ -30,7 +30,7 @@ impl DebuggerEngine {
         let mut breakpoints = BreakpointManager::new();
 
         for bp in initial_breakpoints {
-            breakpoints.add(&bp);
+            let _ = breakpoints.add(&bp, None);
             info!("Breakpoint set at function: {}", bp);
         }
 
@@ -153,8 +153,23 @@ impl DebuggerEngine {
             &mut plugin_ctx,
         );
 
-        if check_breakpoints && self.breakpoints.should_break(function) {
-            self.pause_at_function(function);
+        let (step_count, current_args) = self
+            .state
+            .lock()
+            .map(|s| (s.step_count(), s.current_args().map(String::from)))
+            .unwrap_or((0, None));
+
+        if check_breakpoints {
+            if let Some(bp) = self.breakpoints().get_breakpoint(function) {
+                if let Some(condition) = &bp.condition {
+                    if condition.evaluate(step_count, current_args.as_deref().or(args)) {
+                        let cond_str = format!("{:?}", condition);
+                        self.pause_at_function(function, Some(cond_str));
+                    }
+                } else {
+                    self.pause_at_function(function, None);
+                }
+            }
         }
 
         let start_time = std::time::Instant::now();
@@ -203,10 +218,15 @@ impl DebuggerEngine {
         let mut plugin_ctx = EventContext::new();
         plugin_ctx.stack_depth = 1;
         plugin_ctx.is_paused = true;
+        let condition = self
+            .breakpoints
+            .get_breakpoint(function)
+            .and_then(|bp| bp.condition.as_ref().map(|c| format!("{:?}", c)));
+
         crate::plugin::registry::dispatch_global_event(
             &ExecutionEvent::BreakpointHit {
                 function: function.to_string(),
-                condition: None,
+                condition,
             },
             &mut plugin_ctx,
         );
@@ -372,7 +392,7 @@ impl DebuggerEngine {
         Ok(())
     }
 
-    fn pause_at_function(&mut self, function: &str) {
+    fn pause_at_function(&mut self, function: &str, condition: Option<String>) {
         crate::logging::log_breakpoint(function);
         self.paused = true;
 
@@ -386,7 +406,7 @@ impl DebuggerEngine {
         crate::plugin::registry::dispatch_global_event(
             &ExecutionEvent::BreakpointHit {
                 function: function.to_string(),
-                condition: None,
+                condition,
             },
             &mut plugin_ctx,
         );

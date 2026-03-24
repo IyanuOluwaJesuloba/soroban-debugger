@@ -44,7 +44,7 @@ type DebugRequest =
   | { type: 'Continue' }
   | { type: 'Inspect' }
   | { type: 'GetStorage' }
-  | { type: 'SetBreakpoint'; function: string }
+  | { type: 'SetBreakpoint'; function: string; condition?: string }
   | { type: 'ClearBreakpoint'; function: string }
   | { type: 'Evaluate'; expression: string; frame_id?: number }
   | { type: 'Ping' }
@@ -223,10 +223,11 @@ export class DebuggerProcess {
     this.expectResponse(response, 'Pong');
   }
 
-  async setBreakpoint(functionName: string): Promise<void> {
+  async setBreakpoint(functionName: string, condition?: string): Promise<void> {
     const response = await this.sendRequest({
       type: 'SetBreakpoint',
-      function: functionName
+      function: functionName,
+      condition
     });
     this.expectResponse(response, 'BreakpointSet');
   }

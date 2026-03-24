@@ -240,9 +240,10 @@ impl RemoteClient {
     }
 
     /// Set a breakpoint
-    pub fn set_breakpoint(&mut self, function: &str) -> Result<()> {
+    pub fn set_breakpoint(&mut self, function: &str, condition: Option<String>) -> Result<()> {
         let response = self.send_request(DebugRequest::SetBreakpoint {
             function: function.to_string(),
+            condition,
         })?;
 
         match response {

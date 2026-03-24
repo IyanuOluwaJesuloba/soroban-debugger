@@ -177,7 +177,7 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::Execute { function, args } => match self.engine.as_mut() {
-                    Some(engine) if engine.breakpoints().should_break(&function) => {
+                    Some(engine) if engine.breakpoints().should_break(&function, 0, args.as_deref()) => {
                         engine.prepare_breakpoint_stop(&function, args.as_deref());
                         self.pending_execution = Some(PendingExecution { function, args });
                         DebugResponse::ExecutionResult {
@@ -435,11 +435,17 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::SetBreakpoint { function } => match self.engine.as_mut() {
-                    Some(engine) => {
-                        engine.breakpoints_mut().add(&function);
-                        DebugResponse::BreakpointSet { function }
-                    }
+                DebugRequest::SetBreakpoint {
+                    function,
+                    condition,
+                } => match self.engine.as_mut() {
+                    Some(engine) => match engine.breakpoints_mut().add(&function, condition.as_deref())
+                    {
+                        Ok(_) => DebugResponse::BreakpointSet { function },
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to set breakpoint: {}", e),
+                        },
+                    },
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
