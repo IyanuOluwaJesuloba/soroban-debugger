@@ -16,7 +16,7 @@ impl RemoteClient {
     pub fn connect(addr: &str, token: Option<String>) -> Result<Self> {
         info!("Connecting to debug server at {}", addr);
         let stream = TcpStream::connect(addr).map_err(|e| {
-            DebuggerError::FileError(format!("Failed to connect to {}: {}", addr, e))
+            DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
         })?;
 
         let mut client = Self {
@@ -373,21 +373,22 @@ impl RemoteClient {
             .map_err(|e| DebuggerError::FileError(format!("Failed to serialize request: {}", e)))?;
 
         // Send request
-        writeln!(self.stream.get_mut(), "{}", request_json)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to write to stream: {}", e)))?;
+        writeln!(self.stream.get_mut(), "{}", request_json).map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to write to stream: {}", e))
+        })?;
         self.stream
             .get_mut()
             .flush()
-            .map_err(|e| DebuggerError::FileError(format!("Failed to flush stream: {}", e)))?;
+            .map_err(|e| DebuggerError::NetworkError(format!("Failed to flush stream: {}", e)))?;
 
         // Read response
         let mut response_line = String::new();
         let n = self
             .stream
             .read_line(&mut response_line)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to read response: {}", e)))?;
+            .map_err(|e| DebuggerError::NetworkError(format!("Failed to read response: {}", e)))?;
         if n == 0 {
-            return Err(DebuggerError::FileError("No response from server".to_string()).into());
+            return Err(DebuggerError::NetworkError("No response from server".to_string()).into());
         }
 
         parse_response_line(expected_id, response_line.trim_end())
@@ -436,5 +437,11 @@ mod tests {
         let line = serde_json::to_string(&msg).unwrap();
         let resp = parse_response_line(7, &line).unwrap();
         assert!(matches!(resp, DebugResponse::Pong));
+    }
+
+    #[test]
+    fn connect_failure_is_network_error_category() {
+        let err = RemoteClient::connect("127.0.0.1:1", None).unwrap_err();
+        assert!(err.to_string().contains("Network/transport error"));
     }
 }

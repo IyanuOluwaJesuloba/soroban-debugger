@@ -136,6 +136,9 @@ fn main() -> miette::Result<()> {
     Formatter::configure_colors_from_env();
 
     let mut cli = Cli::parse();
+    if let Some(ref history_file) = cli.history_file {
+        std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", history_file);
+    }
     if should_show_banner(&cli) {
         print_banner();
     }

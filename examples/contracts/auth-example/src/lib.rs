@@ -2,8 +2,13 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
 
-/// This contract demonstrates common authorization patterns and bugs.
-/// It contains both correct and buggy implementations for tutorial purposes.
+//! WARNING: INSECURE EXAMPLE CONTRACT (TUTORIAL ONLY)
+//!
+//! This contract intentionally includes vulnerable `*_buggy` entrypoints to demonstrate how
+//! authorization mistakes show up in the debugger and traces.
+//!
+//! Do NOT deploy this contract and do NOT copy/paste `*_buggy` functions into real contracts.
+//! Use the secure counterparts (`withdraw`, `admin_mint`) as the baseline patterns.
 
 #[derive(Clone)]
 #[contracttype]
@@ -23,6 +28,15 @@ pub enum WalletError {
 #[contract]
 pub struct Wallet;
 
+impl Wallet {
+    fn read_admin(env: &Env) -> Result<Address, WalletError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(WalletError::Unauthorized)
+    }
+}
+
 #[contractimpl]
 impl Wallet {
     /// Initialize the wallet with an admin.
@@ -39,8 +53,10 @@ impl Wallet {
             .set(&DataKey::Balance(to), &(current + amount));
     }
 
-    /// BUGGY: Withdraw without authorization check!
-    /// This is intentionally broken for the tutorial.
+    /// WARNING: INSECURE (`*_buggy`) TUTORIAL FUNCTION — DO NOT COPY/DEPLOY.
+    ///
+    /// Intentionally omits `from.require_auth()` so the debugger can surface a missing-auth bug.
+    /// Use `withdraw` instead.
     pub fn withdraw_buggy(env: Env, from: Address, amount: i128) -> Result<(), WalletError> {
         // BUG: Missing from.require_auth()!
         let balance = Self::get_balance(env.clone(), from.clone());
@@ -72,14 +88,13 @@ impl Wallet {
         Ok(())
     }
 
-    /// BUGGY: Admin function without proper auth check.
+    /// WARNING: INSECURE (`*_buggy`) TUTORIAL FUNCTION — DO NOT COPY/DEPLOY.
+    ///
+    /// Intentionally fetches the admin from storage but omits `admin.require_auth()`.
+    /// Use `admin_mint` instead.
     pub fn admin_mint_buggy(env: Env, to: Address, amount: i128) -> Result<(), WalletError> {
         // BUG: We check if admin exists but don't verify the caller is the admin!
-        let _admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(WalletError::Unauthorized)?;
+        let _admin: Address = Self::read_admin(&env)?;
 
         // Missing: admin.require_auth()
 
@@ -93,11 +108,7 @@ impl Wallet {
 
     /// FIXED: Admin mint with proper authorization.
     pub fn admin_mint(env: Env, to: Address, amount: i128) -> Result<(), WalletError> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(WalletError::Unauthorized)?;
+        let admin: Address = Self::read_admin(&env)?;
 
         // FIXED: Require admin authorization
         admin.require_auth();

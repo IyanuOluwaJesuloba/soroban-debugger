@@ -76,6 +76,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_banner: bool,
 
+    /// Override the history file location (useful for CI, sandboxes, and per-project isolation)
+    ///
+    /// Equivalent to setting `SOROBAN_DEBUG_HISTORY_FILE`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_FILE",
+        value_name = "FILE"
+    )]
+    pub history_file: Option<PathBuf>,
+
     /// Show historical budget trend visualization
     #[arg(long)]
     pub budget_trend: bool,

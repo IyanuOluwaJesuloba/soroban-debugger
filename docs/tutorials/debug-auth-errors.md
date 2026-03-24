@@ -1,5 +1,10 @@
 # How to Debug Authorization Errors
 
+> [!WARNING]
+> The `examples/contracts/auth-example` contract intentionally includes insecure `*_buggy` entrypoints for learning/debugging.
+> Do **not** deploy it and do **not** copy/paste `*_buggy` functions into real contracts.
+> Use the secure counterparts (`withdraw`, `admin_mint`) as your baseline patterns.
+
 Authorization errors are one of the most common and confusing issues when developing Soroban smart contracts. This tutorial will teach you how to identify, diagnose, and fix authorization problems using the Soroban debugger.
 
 ## What Are Authorization Errors?
@@ -40,6 +45,34 @@ Call stack:
 - **Call stack**: The function chain leading to the failure
 
 ## Common Authorization Bugs
+
+### Secure Reference (Copy/Paste Safe)
+
+If you just want a **safe baseline** to start from, use this shape:
+
+```rust
+fn read_admin(env: &Env) -> Result<Address, Error> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::Unauthorized)
+}
+
+pub fn withdraw(env: Env, from: Address, amount: i128) -> Result<(), Error> {
+    from.require_auth(); // check early
+    // ... validate + write storage
+    Ok(())
+}
+
+pub fn admin_mint(env: Env, to: Address, amount: i128) -> Result<(), Error> {
+    let admin = read_admin(&env)?;
+    admin.require_auth(); // verify the *admin* is authorizing
+    // ... mint/write storage
+    Ok(())
+}
+```
+
+The rest of this section shows intentionally buggy variants (`*_buggy`) so you can learn what the debugger output looks like.
 
 ### Bug #1: Missing `require_auth()` Call
 

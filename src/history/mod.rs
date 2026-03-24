@@ -96,6 +96,21 @@ impl Drop for HistoryLockGuard {
 impl HistoryManager {
     /// Create a new HistoryManager using the default `~/.soroban-debug/history.json` path.
     pub fn new() -> Result<Self> {
+        if let Ok(path) = std::env::var("SOROBAN_DEBUG_HISTORY_FILE") {
+            let file_path = PathBuf::from(path);
+            if let Some(parent) = file_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        DebuggerError::FileError(format!(
+                            "Failed to create history directory {:?}: {}",
+                            parent, e
+                        ))
+                    })?;
+                }
+            }
+            return Ok(Self { file_path });
+        }
+
         let home_dir = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_err(|_| {
@@ -120,21 +135,63 @@ impl HistoryManager {
         Self { file_path: path }
     }
 
-    /// Read historical data using highly optimized BufReader.
+    /// Read historical run data from disk.
+    ///
+    /// Returns `Err` if the history file exists but cannot be parsed.
+    ///
+    /// # Why we no longer silently return an empty `Vec`
+    ///
+    /// The previous implementation called
+    /// `serde_json::from_reader(reader).unwrap_or_else(|_| Vec::new())`.
+    /// That had two severe consequences:
+    ///
+    /// 1. **Silent data loss** — a corrupt or partially-written file appeared
+    ///    identical to a brand-new installation.  Callers such as
+    ///    `budget_trend_stats` and `check_regression` would operate on zero
+    ///    records and produce misleading (or absent) output without any
+    ///    indication that real data had been ignored.
+    ///
+    /// 2. **Destructive overwrite** — `append_record` calls `load_history`
+    ///    before writing.  With the silent fallback it would receive an empty
+    ///    `Vec`, push one new record, and atomically replace the corrupt file
+    ///    with a single-record file, permanently destroying all prior history.
+    ///
+    /// Surfacing the error lets the caller decide on a recovery strategy and
+    /// prevents any write path from silently clobbering salvageable data.
     pub fn load_history(&self) -> Result<Vec<RunHistory>> {
         if !self.file_path.exists() {
             return Ok(Vec::new());
         }
+
         let file = File::open(&self.file_path).map_err(|e| {
             DebuggerError::FileError(format!(
                 "Failed to open history file {:?}: {}",
                 self.file_path, e
             ))
         })?;
+
         let reader = BufReader::new(file);
-        let history: Vec<RunHistory> =
-            serde_json::from_reader(reader).unwrap_or_else(|_| Vec::new());
-        Ok(history)
+
+        // Surface parse failures rather than swallowing them.
+        //
+        // A corrupt or truncated file must not be treated as an empty history.
+        // Doing so would cause `append_record` to overwrite the file with a
+        // single-record list, destroying all salvageable data.
+        serde_json::from_reader(reader).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "History file {:?} could not be parsed ({}). \
+                 The file may be corrupt or was written by an incompatible version. \
+                 Recovery options:\n\
+                 \x20 1. Inspect the file with `cat {:?}` and fix any JSON syntax errors.\n\
+                 \x20 2. Back up and remove the file (`mv {:?} {:?}.bak`) to start fresh.\n\
+                 \x20 3. Restore from a previous backup if one exists.",
+                self.file_path,
+                e,
+                self.file_path,
+                self.file_path,
+                self.file_path,
+            ))
+        })
     }
 
     /// Append a new record optimizing with BufWriter.
@@ -342,21 +399,178 @@ pub fn budget_trend_stats(records: &[RunHistory]) -> Option<BudgetTrendStats> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as IoWrite;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
 
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    fn make_record(date: &str, cpu: u64, mem: u64) -> RunHistory {
+        RunHistory {
+            date: date.into(),
     #[test]
     fn test_regression_detection() {
         let p1 = RunHistory {
             date: "2026-01-01T00:00:00Z".into(),
             contract_hash: "hash".into(),
             function: "func".into(),
-            cpu_used: 1000,
-            memory_used: 1000,
-        };
+            cpu_used: cpu,
+            memory_used: mem,
+        }
+    }
+
+    // ── load_history — corrupt file tests (the requested verification) ───────
+
+    /// A file containing invalid JSON must return `Err`, never `Ok(vec![])`.
+    #[test]
+    fn load_history_corrupt_file_returns_error() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"this is not json at all {{{").unwrap();
+        tmp.flush().unwrap();
+
+        let manager = HistoryManager::with_path(tmp.path().to_path_buf());
+        let result = manager.load_history();
+
+        assert!(
+            result.is_err(),
+            "corrupt file must return Err, not Ok(vec![])"
+        );
+    }
+
+    /// The error message must reference the file path so the user knows which
+    /// file to inspect.
+    #[test]
+    fn load_history_error_message_contains_file_path() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"{not valid json}").unwrap();
+        tmp.flush().unwrap();
+
+        let path = tmp.path().to_path_buf();
+        let manager = HistoryManager::with_path(path.clone());
+        let err = manager.load_history().unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains(path.to_string_lossy().as_ref()),
+            "error must mention the file path; got: {msg}"
+        );
+    }
+
+    /// The error message must contain recovery guidance so users know what
+    /// action to take without having to read source code.
+    #[test]
+    fn load_history_error_message_contains_recovery_guidance() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"[{\"broken\":").unwrap(); // truncated JSON
+        tmp.flush().unwrap();
+
+        let manager = HistoryManager::with_path(tmp.path().to_path_buf());
+        let err = manager.load_history().unwrap_err();
+        let msg = err.to_string();
+
+        // The message must mention at least one concrete recovery action.
+        let has_guidance = msg.contains("bak")      // backup suggestion
+            || msg.contains("fix")                  // fix-in-place suggestion
+            || msg.contains("Inspect")              // inspect suggestion
+            || msg.contains("Recovery");            // recovery header
+
+        assert!(has_guidance, "error must include recovery guidance; got: {msg}");
+    }
+
+    /// A truncated (partial write) JSON array must also be treated as corrupt
+    /// and return `Err`.
+    #[test]
+    fn load_history_truncated_file_returns_error() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        // Valid start but cut off mid-record.
+        tmp.write_all(b"[{\"date\":\"2026-01-01\",\"contract_hash\":\"a\"")
+            .unwrap();
+        tmp.flush().unwrap();
+
+        let manager = HistoryManager::with_path(tmp.path().to_path_buf());
+        assert!(
+            manager.load_history().is_err(),
+            "truncated file must return Err"
+        );
+    }
+
+    /// A file containing a JSON object (not an array) must return `Err`
+    /// because the expected type is `Vec<RunHistory>`.
+    #[test]
+    fn load_history_wrong_json_type_returns_error() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"{\"date\":\"2026\",\"cpu_used\":1}").unwrap();
+        tmp.flush().unwrap();
+
+        let manager = HistoryManager::with_path(tmp.path().to_path_buf());
+        assert!(
+            manager.load_history().is_err(),
+            "a JSON object instead of array must return Err"
+        );
+    }
+
+    /// A non-existent file must still return `Ok(vec![])` (first-run case).
+    #[test]
+    fn load_history_missing_file_returns_empty_ok() {
+        let path = std::env::temp_dir().join("soroban-history-definitely-does-not-exist.json");
+        let _ = fs::remove_file(&path); // ensure absent
+        let manager = HistoryManager::with_path(path);
+        let result = manager.load_history();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// A valid empty JSON array must parse successfully and return `Ok(vec![])`.
+    #[test]
+    fn load_history_empty_array_returns_ok() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        tmp.write_all(b"[]").unwrap();
+        tmp.flush().unwrap();
+
+        let manager = HistoryManager::with_path(tmp.path().to_path_buf());
+        let result = manager.load_history().unwrap();
+        assert!(result.is_empty());
+    }
+
+    /// `append_record` must propagate the error rather than silently overwriting
+    /// a corrupt file with a single-record list.
+    #[test]
+    fn append_record_does_not_overwrite_corrupt_file() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        let corrupt_content = b"this is corrupt {{{";
+        tmp.write_all(corrupt_content).unwrap();
+        tmp.flush().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let manager = HistoryManager::with_path(path.clone());
+        let new_record = make_record("2026-01-01T00:00:00Z", 100, 200);
+
+        let result = manager.append_record(new_record);
+        assert!(
+            result.is_err(),
+            "append_record must fail on a corrupt history file, not silently overwrite it"
+        );
+
+        // The original corrupt content must still be on disk — not replaced.
+        let on_disk = fs::read(&path).unwrap();
+        assert_eq!(
+            on_disk, corrupt_content,
+            "corrupt file must not be modified by a failed append"
+        );
+    }
+
+    // ── pre-existing tests (unchanged) ───────────────────────────────────────
+
+    #[test]
+    fn test_regression_detection() {
+        let p1 = make_record("prev", 1000, 1000);
         let p2 = RunHistory {
             date: "2026-01-02T00:00:00Z".into(),
             contract_hash: "hash".into(),
@@ -378,14 +592,7 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
         let manager = HistoryManager::with_path(temp.path().to_path_buf());
 
-        let record = RunHistory {
-            date: "date".into(),
-            contract_hash: "hash".into(),
-            function: "func".into(),
-            cpu_used: 1234,
-            memory_used: 5678,
-        };
-
+        let record = make_record("date", 1234, 5678);
         manager.append_record(record).unwrap();
         let history = manager.load_history().unwrap();
         assert_eq!(history.len(), 1);
@@ -400,27 +607,9 @@ mod tests {
     #[test]
     fn sort_records_by_date_handles_mixed_formats() {
         let mut records = vec![
-            RunHistory {
-                date: "01/02/2026 00:00:00".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 1,
-                memory_used: 1,
-            },
-            RunHistory {
-                date: "2026-01-01T00:00:00Z".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 1,
-                memory_used: 1,
-            },
-            RunHistory {
-                date: "2026-01-03".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 1,
-                memory_used: 1,
-            },
+            make_record("01/02/2026 00:00:00", 1, 1),
+            make_record("2026-01-01T00:00:00Z", 1, 1),
+            make_record("2026-01-03", 1, 1),
         ];
 
         sort_records_by_date(&mut records);
@@ -432,20 +621,8 @@ mod tests {
     #[test]
     fn budget_trend_stats_uses_parsed_date_order_for_first_last() {
         let records = vec![
-            RunHistory {
-                date: "01/02/2026 00:00:00".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 10,
-                memory_used: 10,
-            },
-            RunHistory {
-                date: "2026-01-01T00:00:00Z".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 20,
-                memory_used: 20,
-            },
+            make_record("01/02/2026 00:00:00", 10, 10),
+            make_record("2026-01-01T00:00:00Z", 20, 20),
         ];
 
         let stats = budget_trend_stats(&records).unwrap();
@@ -456,28 +633,9 @@ mod tests {
     #[test]
     fn check_regression_uses_parsed_date_order_for_latest_two() {
         let records = vec![
-            RunHistory {
-                date: "2026-01-02T00:00:00Z".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 100,
-                memory_used: 100,
-            },
-            // This one is newest by date but inserted second.
-            RunHistory {
-                date: "01/03/2026 00:00:00".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 120,
-                memory_used: 100,
-            },
-            RunHistory {
-                date: "2026-01-01".into(),
-                contract_hash: "hash".into(),
-                function: "f".into(),
-                cpu_used: 80,
-                memory_used: 100,
-            },
+            make_record("2026-01-02T00:00:00Z", 100, 100),
+            make_record("01/03/2026 00:00:00", 120, 100),
+            make_record("2026-01-01", 80, 100),
         ];
 
         let (cpu, mem) = check_regression(&records).unwrap();
@@ -520,29 +678,39 @@ mod tests {
     }
 
     #[test]
+    fn new_respects_history_file_env_override() {
+        let temp = TempDir::new().unwrap();
+        let history_path = temp.path().join("custom").join("history.json");
+
+        let old = std::env::var("SOROBAN_DEBUG_HISTORY_FILE").ok();
+        std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", &history_path);
+
+        let manager = HistoryManager::new().unwrap();
+        manager
+            .append_record(RunHistory {
+                date: "d".into(),
+                contract_hash: "h".into(),
+                function: "f".into(),
+                cpu_used: 1,
+                memory_used: 1,
+            })
+            .unwrap();
+
+        assert!(history_path.exists());
+
+        if let Some(old) = old {
+            std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", old);
+        } else {
+            std::env::remove_var("SOROBAN_DEBUG_HISTORY_FILE");
+        }
+    }
+
+    #[test]
     fn budget_trend_stats_computes_min_max_avg_last() {
         let records = vec![
-            RunHistory {
-                date: "2026-01-01T00:00:00Z".into(),
-                contract_hash: "a".into(),
-                function: "f".into(),
-                cpu_used: 10,
-                memory_used: 100,
-            },
-            RunHistory {
-                date: "2026-01-02T00:00:00Z".into(),
-                contract_hash: "a".into(),
-                function: "f".into(),
-                cpu_used: 30,
-                memory_used: 200,
-            },
-            RunHistory {
-                date: "2026-01-03T00:00:00Z".into(),
-                contract_hash: "a".into(),
-                function: "f".into(),
-                cpu_used: 20,
-                memory_used: 150,
-            },
+            make_record("2026-01-01T00:00:00Z", 10, 100),
+            make_record("2026-01-02T00:00:00Z", 30, 200),
+            make_record("2026-01-03T00:00:00Z", 20, 150),
         ];
 
         let stats = budget_trend_stats(&records).unwrap();

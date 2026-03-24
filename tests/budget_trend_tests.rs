@@ -30,6 +30,39 @@ fn budget_trend_empty_history_is_graceful() {
 }
 
 #[test]
+fn budget_trend_respects_history_file_override() {
+    let temp = TempDir::new().unwrap();
+    let history_file = temp.path().join("isolated-history.json");
+
+    // Write history directly to the override file location (no ~/.soroban-debug needed).
+    std::fs::write(
+        &history_file,
+        r#"
+[
+  {
+    "date": "2026-01-01T00:00:00Z",
+    "contract_hash": "contractA",
+    "function": "f1",
+    "cpu_used": 100,
+    "memory_used": 1000
+  }
+]
+"#,
+    )
+    .unwrap();
+
+    base_cmd(temp.path())
+        .args([
+            "--budget-trend",
+            "--history-file",
+            history_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Runs: 1"));
+}
+
+#[test]
 fn budget_trend_filters_change_dataset() {
     let temp = TempDir::new().unwrap();
     write_history(

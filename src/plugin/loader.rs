@@ -283,6 +283,7 @@ mod tests {
 
         // Create three plugin sub-directories in reverse alphabetical order so
         // a naive read_dir would likely return them unsorted.
+        //............
         for name in &["plugin-c", "plugin-a", "plugin-b"] {
             let dir = base.join(name);
             fs::create_dir_all(&dir).unwrap();

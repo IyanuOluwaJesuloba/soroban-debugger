@@ -4,6 +4,7 @@ target/
 **/target/
 **/target/**
 **/*.rs.bk
+*.bak
 *.pdb
 Cargo.lock
 
