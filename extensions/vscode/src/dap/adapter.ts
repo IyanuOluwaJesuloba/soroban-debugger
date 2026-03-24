@@ -213,6 +213,58 @@ export class SorobanDebugSession extends DebugSession {
     this.sendResponse(response);
   }
 
+  protected async evaluateRequest(
+    response: DebugProtocol.EvaluateResponse,
+    args: DebugProtocol.EvaluateArguments
+  ): Promise<void> {
+    const expression = (args.expression || '').trim();
+
+    try {
+      if (expression === 'args' || expression === 'Arguments') {
+        response.body = {
+          result: this.state.args ?? '(none)',
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression === 'storage' || expression === 'Storage') {
+        const storageObject = Object.fromEntries(
+          (this.state.variables || []).map((v) => [v.name, v.value])
+        );
+        response.body = {
+          result: JSON.stringify(storageObject),
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression.startsWith('storage.')) {
+        const key = expression.slice('storage.'.length);
+        const match = (this.state.variables || []).find((v) => v.name === key);
+        if (!match) {
+          throw new Error(`Unknown storage key: ${key}`);
+        }
+        response.body = {
+          result: match.value,
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      throw new Error('Unsupported expression. Try `args`, `storage`, or `storage.<key>`.');
+    } catch (error) {
+      this.sendErrorResponse(response, {
+        id: 1010,
+        format: `Evaluate failed: ${error}`,
+        showUser: false
+      });
+    }
+  }
+
   protected async continueRequest(
     response: DebugProtocol.ContinueResponse,
     args: DebugProtocol.ContinueArguments
