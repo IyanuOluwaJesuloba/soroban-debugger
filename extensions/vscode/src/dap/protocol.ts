@@ -62,6 +62,6 @@ export interface DebuggerState {
   currentThread?: number;
   breakpoints: Map<string, BreakpointLocation[]>;
   callStack?: StackFrame[];
-  variables?: Variable[];
+  storage?: Record<string, unknown>;
   args?: string;
 }

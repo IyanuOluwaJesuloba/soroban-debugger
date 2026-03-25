@@ -7,6 +7,7 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import * as readline from 'readline';
 import { DebuggerProcess, DebuggerProcessConfig } from '../cli/debuggerProcess';
 import { DebuggerState, Variable } from './protocol';
+import { VariableStore } from './variableStore';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
 
@@ -19,10 +20,9 @@ export class SorobanDebugSession extends DebugSession {
     isPaused: false,
     breakpoints: new Map(),
     callStack: [],
-    variables: []
+    storage: {}
   };
-  private variableHandles = new Map<number, any>();
-  private nextVarHandle = 1;
+  private variableStore = new VariableStore();
   private threadId = 1;
   private outputReaders: readline.Interface[] = [];
   private hasExecuted = false;
@@ -40,6 +40,7 @@ export class SorobanDebugSession extends DebugSession {
     response.body = response.body || {};
     response.body.supportsConfigurationDoneRequest = true;
     response.body.supportsEvaluateForHovers = true;
+    (response.body as any).supportsVariablePaging = true;
     (response.body as any).supportsCancelRequest = true;
     response.body.supportsSetVariable = false;
     response.body.supportsSetExpression = false;
@@ -71,8 +72,7 @@ export class SorobanDebugSession extends DebugSession {
       this.state.isRunning = true;
       this.state.isPaused = false;
       this.hasExecuted = false;
-      this.variableHandles.clear();
-      this.nextVarHandle = 1;
+      this.variableStore.reset();
       this.exportedFunctions = await this.debuggerProcess.getContractFunctions();
 
       this.attachProcessListeners();
@@ -171,22 +171,20 @@ export class SorobanDebugSession extends DebugSession {
     args: DebugProtocol.ScopesArguments
   ): Promise<void> {
     // Rebuild handles each time to reflect the latest paused state.
-    this.variableHandles.clear();
-    this.nextVarHandle = 1;
+    this.variableStore.reset();
 
     const scopes: DebugProtocol.Scope[] = [];
 
-    const argsRef = this.nextVarHandle++;
-    this.variableHandles.set(argsRef, this.argsToVariables(this.state.args));
+    const argsRef = this.variableStore.createListHandle(this.variableStore.variablesFromArgs(this.state.args));
     scopes.push({
       name: 'Arguments',
       variablesReference: argsRef,
       expensive: false
     });
 
-    if (this.state.variables && this.state.variables.length > 0) {
-      const variablesRef = this.nextVarHandle++;
-      this.variableHandles.set(variablesRef, this.state.variables);
+    const storageKeys = this.state.storage ? Object.keys(this.state.storage) : [];
+    if (storageKeys.length > 0) {
+      const variablesRef = this.variableStore.createListHandle(this.variableStore.variablesFromStorage(this.state.storage as Record<string, unknown>));
 
       scopes.push({
         name: 'Storage',
@@ -203,14 +201,19 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.VariablesResponse,
     args: DebugProtocol.VariablesArguments
   ): Promise<void> {
-    const variables = this.variableHandles.get(args.variablesReference) || [];
+    const variables = this.variableStore.getVariables(args.variablesReference, {
+      start: (args as any).start as number | undefined,
+      count: (args as any).count as number | undefined
+    });
 
     response.body = {
       variables: variables.map((v: Variable) => ({
         name: v.name,
         value: v.value,
         type: v.type,
-        variablesReference: v.variablesReference || 0
+        variablesReference: v.variablesReference || 0,
+        indexedVariables: v.indexedVariables,
+        namedVariables: v.namedVariables
       }))
     };
 
@@ -567,85 +570,7 @@ export class SorobanDebugSession extends DebugSession {
       };
     });
     this.state.args = inspection.args;
-    this.state.variables = this.storageToVariables(storage);
-  }
-
-  private argsToVariables(args: string | undefined): Variable[] {
-    if (!args) {
-      return [{
-        name: '(args)',
-        value: '(none)',
-        type: 'string',
-        variablesReference: 0
-      }];
-    }
-
-    try {
-      const parsed = JSON.parse(args);
-      return this.valueToVariables(parsed, 'arg');
-    } catch {
-      return [{
-        name: '(args)',
-        value: args,
-        type: 'string',
-        variablesReference: 0
-      }];
-    }
-  }
-
-  private valueToVariables(value: any, keyPrefix: string): Variable[] {
-    if (Array.isArray(value)) {
-      return value.slice(0, 100).map((item, index) => this.makeVariable(`${keyPrefix}${index}`, item));
-    }
-
-    if (value && typeof value === 'object') {
-      return Object.keys(value)
-        .sort((a, b) => a.localeCompare(b))
-        .slice(0, 100)
-        .map((key) => this.makeVariable(key, value[key]));
-    }
-
-    return [this.makeVariable(keyPrefix, value)];
-  }
-
-  private makeVariable(name: string, value: any): Variable {
-    if (value === null || value === undefined) {
-      return { name, value: String(value), type: 'null', variablesReference: 0 };
-    }
-
-    if (typeof value === 'string') {
-      return { name, value, type: 'string', variablesReference: 0 };
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return { name, value: String(value), type: typeof value, variablesReference: 0 };
-    }
-
-    if (Array.isArray(value)) {
-      const ref = this.nextVarHandle++;
-      this.variableHandles.set(ref, this.valueToVariables(value, `${name}[`));
-      return { name, value: `Array(${value.length})`, type: 'array', variablesReference: ref };
-    }
-
-    if (typeof value === 'object') {
-      const keys = Object.keys(value);
-      const ref = this.nextVarHandle++;
-      this.variableHandles.set(ref, this.valueToVariables(value, name));
-      return { name, value: `Object(${keys.length})`, type: 'object', variablesReference: ref };
-    }
-
-    return { name, value: String(value), type: typeof value, variablesReference: 0 };
-  }
-
-  private storageToVariables(storage: Record<string, unknown>): Variable[] {
-    return Object.entries(storage)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, value]) => ({
-        name,
-        value: typeof value === 'string' ? value : JSON.stringify(value),
-        type: Array.isArray(value) ? 'array' : typeof value,
-        variablesReference: 0
-      }));
+    this.state.storage = storage;
   }
 
   public async stop(): Promise<void> {
@@ -670,7 +595,7 @@ export class SorobanDebugSession extends DebugSession {
     this.state.isRunning = false;
     this.state.isPaused = false;
     this.state.callStack = [];
-    this.state.variables = [];
+    this.state.storage = {};
     this.state.args = undefined;
     this.hasExecuted = false;
     this.sourceFunctionBreakpoints.clear();

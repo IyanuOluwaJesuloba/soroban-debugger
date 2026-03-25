@@ -4,6 +4,7 @@ import * as net from 'net';
 import * as path from 'path';
 import { DebuggerProcess } from '../cli/debuggerProcess';
 import { resolveSourceBreakpoints } from '../dap/sourceBreakpoints';
+import { VariableStore } from '../dap/variableStore';
 
 type DebugMessage = {
   id: number;
@@ -114,6 +115,51 @@ async function wait(ms: number): Promise<void> {
 async function main(): Promise<void> {
   const extensionRoot = process.cwd();
   const repoRoot = path.resolve(extensionRoot, '..', '..');
+
+  {
+    const store = new VariableStore({ pageSize: 3, maxStringPreview: 6, maxHexPreviewBytes: 2 });
+
+    const bigArray = [1, 2, 3, 4, 5, 6, 7];
+    const arrayVar = store.toVariable('arr', bigArray);
+    assert.ok(arrayVar.variablesReference && arrayVar.variablesReference > 0, 'Expected array to be expandable');
+    assert.equal(arrayVar.indexedVariables, bigArray.length);
+
+    const firstPage = store.getVariables(arrayVar.variablesReference as number);
+    assert.deepEqual(firstPage.slice(0, 3).map((v) => v.name), ['[0]', '[1]', '[2]']);
+    assert.equal(firstPage[0].value, '1');
+
+    const pager = firstPage[3];
+    assert.match(pager.name, /show more/i);
+    assert.ok(pager.variablesReference && pager.variablesReference > 0, 'Expected pager to be expandable');
+
+    const secondPage = store.getVariables(pager.variablesReference as number);
+    assert.deepEqual(secondPage.slice(0, 3).map((v) => v.name), ['[3]', '[4]', '[5]']);
+    assert.equal(secondPage[2].value, '6');
+
+    const thirdPager = secondPage[3];
+    const thirdPage = store.getVariables(thirdPager.variablesReference as number);
+    assert.deepEqual(thirdPage.map((v) => v.name), ['[6]']);
+
+    const longString = store.toVariable('s', '1234567890');
+    assert.ok(longString.variablesReference && longString.variablesReference > 0, 'Expected long string to be expandable');
+    assert.match(longString.value, /truncated/i);
+    const fullString = store.getVariables(longString.variablesReference as number);
+    assert.equal(fullString[0].name, '(full)');
+    assert.equal(fullString[0].value, '1234567890');
+
+    const bytesVar = store.toVariable('b', { type: 'bytes', value: '0x01020304' });
+    assert.ok(bytesVar.variablesReference && bytesVar.variablesReference > 0, 'Expected bytes to be expandable');
+    assert.match(bytesVar.value, /bytes\(\d+\)/);
+    const bytesDetails = store.getVariables(bytesVar.variablesReference as number);
+    assert.ok(bytesDetails.some((v) => v.name === 'hex'), 'Expected bytes details to include hex');
+    assert.ok(bytesDetails.some((v) => v.name === 'base64'), 'Expected bytes details to include base64');
+
+    const addr = 'G' + 'A'.repeat(55);
+    const addrVar = store.toVariable('a', addr);
+    assert.equal(addrVar.type, 'address');
+
+    console.log('Variable rendering unit tests passed');
+  }
 
   {
     const mockServer = await startMockDebuggerServer({ evaluateDelayMs: 150 });

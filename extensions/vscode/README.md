@@ -137,6 +137,12 @@ When execution is paused:
 2. Expand the **Variables** section to see contract storage state
 3. Hover over variables to see detailed information
 
+#### Large / Nested Values
+
+- Arrays and objects expand lazily and are paginated with an explicit `… show more` entry to avoid freezing the UI.
+- Long string values are truncated with a `(truncated, expand)` hint; expanding reveals the full value.
+- Typed argument annotations like `{"type":"bytes","value":"0x..."}` render as `bytes(n)` previews; expanding shows hex/base64/utf8 details.
+
 ### Using the Call Stack
 
 The **Call Stack** panel shows:
