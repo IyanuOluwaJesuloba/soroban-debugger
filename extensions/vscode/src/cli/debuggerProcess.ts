@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
 import { WIRE_PROTOCOL_MAX_VERSION, WIRE_PROTOCOL_MIN_VERSION } from '../dap/protocol';
+import { LogManager, LogLevel, LogPhase } from '../debug/logManager';
 
 export interface DebuggerProcessConfig {
   contractPath: string;
@@ -186,19 +187,21 @@ export function formatProtocolMismatchMessage(details: {
 }
 
 export class DebuggerProcess {
-  private process: ChildProcess | null = null;
+  private childProcess: ChildProcess | null = null;
   private socket: net.Socket | null = null;
   private buffer = '';
   private requestId = 0;
   private pendingRequests = new Map<number, PendingRequest>();
   private config: DebuggerProcessConfig;
+  private logManager: LogManager | undefined;
   private port: number | null = null;
   private negotiatedProtocolVersion: number | null = null;
   private defaultRequestTimeoutMs: number;
   private defaultConnectTimeoutMs: number;
 
-  constructor(config: DebuggerProcessConfig) {
+  constructor(config: DebuggerProcessConfig, logManager?: LogManager) {
     this.config = config;
+    this.logManager = logManager;
 
     const envRequestTimeout = Number(process.env.SOROBAN_DEBUG_REQUEST_TIMEOUT_MS);
     const envConnectTimeout = Number(process.env.SOROBAN_DEBUG_CONNECT_TIMEOUT_MS);
@@ -213,13 +216,17 @@ export class DebuggerProcess {
   }
 
   async start(): Promise<void> {
-    if (this.process || this.socket) {
+    if (this.childProcess || this.socket) {
       return;
     }
+
+    this.logManager?.log(LogLevel.Info, LogPhase.Lifecycle, 'Starting debugger backend process...');
 
     const binaryPath = resolveDebuggerBinaryPath(this.config);
     const port = this.config.port ?? await this.findAvailablePort();
     this.port = port;
+
+    this.logManager?.log(LogLevel.Info, LogPhase.Spawn, `Spawning backend: ${binaryPath} server --port ${port}`);
 
     const child = spawn(binaryPath, this.buildArgs(port), {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -228,8 +235,9 @@ export class DebuggerProcess {
         ...(this.config.trace ? { RUST_LOG: 'debug' } : {})
       }
     });
-    this.process = child;
+    this.childProcess = child;
 
+    try {
       child.once('exit', () => {
         this.rejectPendingRequests(new Error('Debugger server exited'));
         this.socket?.destroy();
@@ -237,10 +245,14 @@ export class DebuggerProcess {
       });
 
       await this.waitForServer(port);
+      this.logManager?.log(LogLevel.Info, LogPhase.Connect, `Connecting to debugger server on port ${port}...`);
       await this.connect(port);
+      this.logManager?.log(LogLevel.Info, LogPhase.Connect, 'Connection established. Negotiating protocol...');
       await this.negotiateProtocol();
+      this.logManager?.log(LogLevel.Info, LogPhase.Connect, `Protocol negotiated: ${this.negotiatedProtocolVersion || 'unknown'}`);
 
       if (this.config.token) {
+        this.logManager?.log(LogLevel.Info, LogPhase.Auth, 'Authenticating with token...');
         const response = await this.sendRequest({
           type: 'Authenticate',
           token: this.config.token
@@ -252,6 +264,7 @@ export class DebuggerProcess {
       }
 
       if (this.config.snapshotPath) {
+        this.logManager?.log(LogLevel.Info, LogPhase.Load, `Loading snapshot: ${this.config.snapshotPath}`);
         const response = await this.sendRequest({
           type: 'LoadSnapshot',
           snapshot_path: this.config.snapshotPath
@@ -259,6 +272,7 @@ export class DebuggerProcess {
         this.expectResponse(response, 'SnapshotLoaded');
       }
 
+      this.logManager?.log(LogLevel.Info, LogPhase.Load, `Loading contract: ${this.config.contractPath}`);
       const contractResponse = await this.sendRequest({
         type: 'LoadContract',
         contract_path: this.config.contractPath
@@ -444,22 +458,22 @@ export class DebuggerProcess {
       this.socket = null;
     }
 
-    if (!this.process) {
+    if (!this.childProcess) {
       return;
     }
 
-    if (this.process.killed) {
-      this.process = null;
+    if (this.childProcess.killed) {
+      this.childProcess = null;
       return;
     }
 
     await new Promise<void>((resolve) => {
-      if (!this.process) {
+      if (!this.childProcess) {
         resolve();
         return;
       }
 
-      const child = this.process;
+      const child = this.childProcess;
       const timeout = setTimeout(() => {
         if (!child.killed) {
           child.kill('SIGKILL');
@@ -473,61 +487,15 @@ export class DebuggerProcess {
       child.kill('SIGTERM');
     });
 
-    this.process = null;
-  }
-
-  sendCommand(command: any): Promise<any> {
-    return new Promise((resolve, reject) => {
-      if (!this.process || !this.process.stdin || !this.process.stdout) {
-        reject(new Error('Debugger process not running'));
-        return;
-      }
-
-      const input = JSON.stringify({
-        id: Math.floor(Math.random() * 1000000),
-        request: command
-      }) + '\n';
-
-      const listener = (data: Buffer) => {
-        const lines = data.toString().split('\n');
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const response = JSON.parse(line);
-            if (response.response && response.response.type === command.type + 'Result') {
-              this.process!.stdout!.removeListener('data', listener);
-              resolve(response.response);
-              return;
-            }
-          } catch (e) {
-            // ignore non-json
-          }
-        }
-      };
-
-      this.process.stdout.on('data', listener);
-      this.process.stdin.write(input);
-      
-      // Timeout after 10s
-      setTimeout(() => {
-        if (this.process && this.process.stdout) {
-          this.process.stdout.removeListener('data', listener);
-        }
-        reject(new Error('Command timeout'));
-      }, 10000);
-    });
-  }
-
-  getInputStream() {
-    return null;
+    this.childProcess = null;
   }
 
   getOutputStream() {
-    return this.process?.stdout;
+    return this.childProcess?.stdout;
   }
 
   getErrorStream() {
-    return this.process?.stderr;
+    return this.childProcess?.stderr;
   }
 
   private buildArgs(port: number): string[] {
@@ -541,7 +509,7 @@ export class DebuggerProcess {
   }
 
   isRunning(): boolean {
-    return this.process !== null && this.socket !== null && !this.socket.destroyed;
+    return this.childProcess !== null && this.socket !== null && !this.socket.destroyed;
   }
 
   private async findAvailablePort(): Promise<number> {
@@ -571,8 +539,8 @@ export class DebuggerProcess {
     const deadline = Date.now() + this.defaultConnectTimeoutMs;
 
     while (Date.now() < deadline) {
-      if (this.process && this.process.exitCode !== null) {
-        throw new Error(`Debugger server exited with code ${this.process.exitCode}`);
+      if (this.childProcess && this.childProcess.exitCode !== null) {
+        throw new Error(`Debugger server exited with code ${this.childProcess.exitCode}`);
       }
 
       if (await this.canConnect(port)) {
@@ -645,6 +613,7 @@ export class DebuggerProcess {
       }
 
       this.pendingRequests.delete(message.id);
+      this.logManager?.log(LogLevel.Debug, LogPhase.Connect, `Backend response [${message.id}]: ${JSON.stringify(message.response)}`);
       pending.resolve(message.response);
     }
   }
@@ -680,6 +649,7 @@ export class DebuggerProcess {
       });
     });
 
+    this.logManager?.log(LogLevel.Debug, LogPhase.Connect, `Backend request [${id}]: ${JSON.stringify(request)}`);
     this.socket.write(`${JSON.stringify(message)}\n`);
     const response = await responsePromise;
     if (response.type === 'Error') {

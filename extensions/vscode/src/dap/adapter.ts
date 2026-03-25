@@ -5,14 +5,16 @@ import {
   ExitedEvent} from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import * as readline from 'readline';
-import { DebuggerProcess, DebuggerProcessConfig } from '../cli/debuggerProcess';
+import { DebuggerProcess, DebuggerProcessConfig, validateLaunchConfig, DebuggerTimeoutError } from '../cli/debuggerProcess';
 import { BreakpointCapabilities, BreakpointLocation, DebuggerState, Variable } from './protocol';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
+import { LogManager, LogLevel as ManagerLogLevel, LogPhase } from '../debug/logManager';
 
 type LaunchRequestArgs = DebugProtocol.LaunchRequestArguments & DebuggerProcessConfig;
 
 export class SorobanDebugSession extends DebugSession {
+  private logManager: LogManager | undefined;
   private debuggerProcess: DebuggerProcess | null = null;
   private state: DebuggerState = {
     isRunning: false,
@@ -34,10 +36,18 @@ export class SorobanDebugSession extends DebugSession {
     logPoints: true
   };
 
+  constructor(logManagerOrLinesStartAt1?: LogManager | boolean, isServer?: boolean) {
+    super();
+    if (typeof logManagerOrLinesStartAt1 !== 'boolean') {
+      this.logManager = logManagerOrLinesStartAt1;
+    }
+  }
+
   protected initializeRequest(
     response: DebugProtocol.InitializeResponse,
     args: DebugProtocol.InitializeRequestArguments
   ): void {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `InitializeRequest: ${JSON.stringify(args)}`);
     response.body = response.body || {};
     response.body.supportsConfigurationDoneRequest = true;
     response.body.supportsEvaluateForHovers = true;
@@ -55,6 +65,7 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.LaunchResponse,
     args: LaunchRequestArgs
   ): Promise<void> {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `LaunchRequest: ${JSON.stringify(args)}`);
     try {
       const preflight = await validateLaunchConfig(args);
       if (!preflight.ok) {
@@ -73,7 +84,7 @@ export class SorobanDebugSession extends DebugSession {
         token: args.token,
         requestTimeoutMs: args.requestTimeoutMs,
         connectTimeoutMs: args.connectTimeoutMs
-      });
+      }, this.logManager);
 
       await this.debuggerProcess.start();
       this.state.isRunning = true;
@@ -251,7 +262,7 @@ export class SorobanDebugSession extends DebugSession {
     this.sendResponse(response);
   }
 
-  protected async evaluateRequest(
+   protected async evaluateRequest(
     response: DebugProtocol.EvaluateResponse,
     args: DebugProtocol.EvaluateArguments
   ): Promise<void> {
@@ -262,6 +273,7 @@ export class SorobanDebugSession extends DebugSession {
         await this.refreshState();
       }
 
+      // 1. Check for "magic" variables (local overrides)
       if (expression === 'args' || expression === 'Arguments') {
         response.body = {
           result: this.state.args ?? '(none)',
@@ -297,7 +309,19 @@ export class SorobanDebugSession extends DebugSession {
         return;
       }
 
-      throw new Error('Unsupported expression. Try `args`, `storage`, or `storage.<key>`.');
+      // 2. Fall back to backend evaluation if available and paused
+      if (this.debuggerProcess && this.state.isPaused) {
+        const result = await this.debuggerProcess.evaluate(args.expression, args.frameId);
+        response.body = {
+          result: result.result,
+          type: result.type,
+          variablesReference: result.variablesReference
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      throw new Error('Unsupported expression or debugger not paused. Try `args`, `storage`, or `storage.<key>`.');
     } catch (error) {
       if (error instanceof DebuggerTimeoutError) {
         this.sendErrorResponse(response, {
@@ -373,25 +397,6 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.NextResponse,
     args: DebugProtocol.NextArguments
   ): Promise<void> {
-    if (!this.debuggerProcess) {
-      this.sendResponse(response);
-      return;
-    }
-
-    try {
-      const result = await this.debuggerProcess.sendCommand({
-        type: 'StepOverLine'
-      });
-      
-      this.sendResponse(response);
-
-      if (result && result.paused) {
-        this.state.isPaused = true;
-        this.sendEvent(new StoppedEvent('step', this.threadId));
-      }
-    } catch (e) {
-      this.sendResponse(response);
-    }
     await this.stepOnce(response, 'next');
   }
 
@@ -453,40 +458,11 @@ export class SorobanDebugSession extends DebugSession {
     }
   }
 
-  protected async evaluateRequest(
-    response: DebugProtocol.EvaluateResponse,
-    args: DebugProtocol.EvaluateArguments
-  ): Promise<void> {
-    if (!this.debuggerProcess || !this.state.isPaused) {
-      this.sendErrorResponse(response, {
-        id: 1004,
-        format: 'Evaluation is only available when the debugger is paused',
-        showUser: true
-      });
-      return;
-    }
-
-    try {
-      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId);
-      response.body = {
-        result: result.result,
-        type: result.type,
-        variablesReference: result.variablesReference
-      };
-      this.sendResponse(response);
-    } catch (error) {
-      this.sendErrorResponse(response, {
-        id: 1005,
-        format: `${error}`,
-        showUser: false
-      });
-    }
-  }
-
   protected async disconnectRequest(
     response: DebugProtocol.DisconnectResponse,
     args: DebugProtocol.DisconnectArguments
   ): Promise<void> {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `DisconnectRequest: ${JSON.stringify(args)}`);
     await this.stop();
     this.sendResponse(response);
   }
@@ -502,6 +478,7 @@ export class SorobanDebugSession extends DebugSession {
       });
 
       reader.on('line', (line: string) => {
+        this.logManager?.log(ManagerLogLevel.Debug, LogPhase.Backend, line);
         this.sendEvent(new LogOutputEvent(line + '\n', LogLevel.Log));
       });
       this.outputReaders.push(reader);
@@ -515,6 +492,7 @@ export class SorobanDebugSession extends DebugSession {
       });
 
       reader.on('line', (line: string) => {
+        this.logManager?.log(ManagerLogLevel.Error, LogPhase.Backend, line);
         this.sendEvent(new LogOutputEvent(line + '\n', LogLevel.Error));
       });
       this.outputReaders.push(reader);

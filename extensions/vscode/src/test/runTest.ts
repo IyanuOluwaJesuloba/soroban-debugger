@@ -1,7 +1,8 @@
 import * as assert from 'assert';
+import { ChildProcess, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { DebuggerProcess, validateLaunchConfig } from '../cli/debuggerProcess';
+import { DebuggerProcess, validateLaunchConfig, formatProtocolMismatchMessage, DebuggerTimeoutError } from '../cli/debuggerProcess';
 import { resolveSourceBreakpoints } from '../dap/sourceBreakpoints';
 import { DapClient } from './dapClient';
 

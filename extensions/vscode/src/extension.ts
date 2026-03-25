@@ -6,6 +6,7 @@ import {
   validateLaunchConfig
 } from './cli/debuggerProcess';
 import { SorobanDebugAdapterDescriptorFactory } from './debug/adapter';
+import { LogManager } from './debug/logManager';
 
 type SorobanLaunchConfig = vscode.DebugConfiguration & DebuggerProcessConfig;
 
@@ -112,8 +113,11 @@ class SorobanDebugConfigurationProvider implements vscode.DebugConfigurationProv
   }
 }
 
+let logManager: LogManager | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
-  const factory = new SorobanDebugAdapterDescriptorFactory(context);
+  logManager = new LogManager(context);
+  const factory = new SorobanDebugAdapterDescriptorFactory(context, logManager);
   const configurationProvider = new SorobanDebugConfigurationProvider();
 
   const configProvider: vscode.DebugConfigurationProvider = {
@@ -133,7 +137,9 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Cleanup on extension deactivation
+  if (logManager) {
+    logManager.dispose();
+  }
 }
 
 async function ensureLaunchConfig(folder: vscode.WorkspaceFolder | undefined): Promise<void> {
