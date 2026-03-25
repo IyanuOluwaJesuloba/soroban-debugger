@@ -5,7 +5,7 @@ import {
   ExitedEvent} from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import * as readline from 'readline';
-import { DebuggerProcess, DebuggerProcessConfig, validateLaunchConfig } from '../cli/debuggerProcess';
+import { DebuggerProcess, DebuggerProcessConfig } from '../cli/debuggerProcess';
 import { BreakpointCapabilities, BreakpointLocation, DebuggerState, Variable } from './protocol';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
