@@ -10,9 +10,12 @@ use tracing::{debug, error, info, warn};
 static GLOBAL_PLUGIN_REGISTRY: OnceLock<Arc<RwLock<PluginRegistry>>> = OnceLock::new();
 
 fn env_var_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    std::env::var(name).ok().is_some_and(|v| env_value_truthy(&v))
+}
+
+fn env_value_truthy(value: &str) -> bool {
+    let normalized = value.trim().to_lowercase();
+    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
 }
 
 /// Initialize the global plugin registry and load plugins from disk.
@@ -25,7 +28,15 @@ pub fn init_global_plugin_registry() -> Arc<RwLock<PluginRegistry>> {
             if env_var_truthy("SOROBAN_DEBUG_NO_PLUGINS") {
                 info!("Plugins disabled via SOROBAN_DEBUG_NO_PLUGINS");
             } else {
-                let _ = registry.load_all_plugins();
+                let load_results = registry.load_all_plugins();
+                let total = load_results.len();
+                let failed = load_results.iter().filter(|r| r.is_err()).count();
+                if failed > 0 {
+                    warn!(
+                        "Plugin loading completed with {} failure(s) out of {} plugin(s)",
+                        failed, total
+                    );
+                }
             }
             Arc::new(RwLock::new(registry))
         })
@@ -604,6 +615,30 @@ mod tests {
         let e = entries(pairs);
         let (order, _) = toposort_names(&e);
         order.into_iter().map(|i| e[i].0.clone()).collect()
+    }
+
+    #[test]
+    fn env_value_truthy_accepts_common_truthy_variants() {
+        let cases = ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"];
+
+        for case in cases {
+            assert!(
+                env_value_truthy(case),
+                "expected '{case}' to be considered truthy"
+            );
+        }
+    }
+
+    #[test]
+    fn env_value_truthy_rejects_non_truthy_values() {
+        let cases = ["", "   ", "0", "false", "FALSE", "off", "no", "random"];
+
+        for case in cases {
+            assert!(
+                !env_value_truthy(case),
+                "expected '{case}' to be considered non-truthy"
+            );
+        }
     }
 
     // ── toposort_names — basic ordering ─────────────────────────────────────

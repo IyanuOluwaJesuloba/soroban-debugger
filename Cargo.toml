@@ -35,7 +35,6 @@ exclude = [
     "ARCHITECTURE.md",
     "BATCH_EXECUTION_SUMMARY.md",
     "CONTRIBUTING.md",
-    "CONTRIBUTION.md",
     "test_snapshot.rs",
 ]
 
@@ -56,6 +55,8 @@ crossterm = "0.27"
 # WASM parsing
 wasmparser = "0.121"
 walrus = "0.20"
+gimli = "0.28"
+object = "0.32"
 
 # Error handling
 anyhow = "1.0"
@@ -102,7 +103,7 @@ rustyline = "13.0"
 
 # Snapshot loading
 soroban-ledger-snapshot = "22.0.2"
-gimli = "0.33.0"
+
 
 [dev-dependencies]
 assert_cmd = "2.0"

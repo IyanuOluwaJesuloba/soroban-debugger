@@ -1,4 +1,6 @@
-use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
+use crate::server::protocol::{
+    DebugMessage, DebugRequest, DebugResponse, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+};
 use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -26,12 +28,42 @@ impl RemoteClient {
             authenticated: token.is_none(),
         };
 
+        client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
+
         // Authenticate if token is provided
         if let Some(token) = token {
             client.authenticate(&token)?;
         }
 
         Ok(client)
+    }
+
+    /// Perform a protocol handshake and verify compatibility.
+    pub fn handshake(&mut self, client_name: &str, client_version: &str) -> Result<u32> {
+        let response = self.send_request(DebugRequest::Handshake {
+            client_name: client_name.to_string(),
+            client_version: client_version.to_string(),
+            protocol_min: PROTOCOL_MIN_VERSION,
+            protocol_max: PROTOCOL_MAX_VERSION,
+        })?;
+
+        match response {
+            DebugResponse::HandshakeAck {
+                selected_version, ..
+            } => Ok(selected_version),
+            DebugResponse::IncompatibleProtocol { message, .. } => {
+                Err(DebuggerError::ExecutionError(format!(
+                    "Incompatible debugger protocol: {}",
+                    message
+                ))
+                .into())
+            }
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to Handshake".to_string())
+                    .into(),
+            ),
+        }
     }
 
     /// Authenticate with the server
@@ -241,7 +273,7 @@ impl RemoteClient {
     }
 
     /// Set a breakpoint
-    pub fn set_breakpoint(&mut self, function: &str) -> Result<()> {
+    pub fn set_breakpoint(&mut self, function: &str, condition: Option<String>) -> Result<()> {
         let response = self.send_request(DebugRequest::SetBreakpoint {
             id: function.to_string(),
             function: function.to_string(),
@@ -363,7 +395,9 @@ impl RemoteClient {
         if !self.authenticated
             && !matches!(
                 request,
-                DebugRequest::Authenticate { .. } | DebugRequest::Ping
+                DebugRequest::Handshake { .. }
+                    | DebugRequest::Authenticate { .. }
+                    | DebugRequest::Ping
             )
         {
             return Err(DebuggerError::ExecutionError(

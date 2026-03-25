@@ -136,4 +136,9 @@ impl TimelineManager {
     pub fn len(&self) -> usize {
         self.history.len()
     }
+
+    /// Check if history is empty
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
 }

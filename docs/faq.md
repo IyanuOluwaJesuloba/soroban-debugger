@@ -9,6 +9,7 @@ This page covers common questions, confusing behaviors, and troubleshooting tips
 - [Budget](#budget)
 - [Output and Trace](#output-and-trace)
 - [Argument Parsing](#argument-parsing)
+- [CLI vs VS Code Extension](#cli-vs-vs-code-extension---feature-differences)
 
 ---
 
@@ -133,3 +134,46 @@ soroban-debug run --trace-output trace.json --storage-filter 'balance:*'
 ```bash
 NO_COLOR=1 soroban-debug run --no-unicode ...
 ```
+
+---
+
+## CLI vs VS Code Extension - Feature Differences
+
+### 18. A feature works in the CLI but is not available in the VS Code extension (or vice versa)
+
+**Answer:** The CLI and the VS Code extension do not have full feature parity. The CLI exposes the complete debugger surface; the extension exposes a focused subset via the Debug Adapter Protocol (DAP).
+
+The authoritative reference is the **[Feature Matrix](feature-matrix.md)**. It lists every feature, which surface supports it, and any relevant limitations.
+
+Key asymmetries at a glance:
+
+- **CLI-only features:** instruction-level stepping (`--instruction-debug`, `--step-instructions`, `--step-mode`), storage filters (`--storage-filter`), auth tree display (`--show-auth`), batch execution (`--batch-args`, `--repeat`), remote client mode (`soroban-debug remote`), TLS configuration, storage export (`--export-storage`), event filtering (`--show-events`, `--event-filter`), dry-run mode (`--dry-run`), cross-contract mocking (`--mock`), and all analysis subcommands (`analyze`, `symbolic`, `optimize`, `profile`, `compare`, `replay`, `upgrade-check`, `scenario`, `tui`, `repl`).
+- **Extension-only features:** hover evaluation (expression evaluation on mouse-hover while paused).
+- **Shared features:** function breakpoints, step in/over/out, continue, call stack inspection, variable and storage inspection when paused, expression evaluation in the Debug Console.
+
+**Which surface to use:**
+
+- Use the **VS Code extension** for a visual IDE experience: set breakpoints by clicking, inspect variables in the sidebar, navigate the call stack with keyboard shortcuts.
+- Use the **CLI** for full debugging power: instruction-level stepping, storage filtering, auth analysis, batch runs, remote/CI scenarios, and any of the analysis subcommands.
+
+### 19. The VS Code extension shows all storage keys but I only want to see a subset
+
+**Cause:** Storage filtering via `--storage-filter` is not exposed in the extension's launch configuration. All storage keys are shown unfiltered in the Variables panel.
+
+**Workaround:** Either run `soroban-debug run --storage-filter '<pattern>'` from the terminal to get a targeted view, or use `snapshotPath` in `launch.json` to provide a pre-filtered initial storage state. See the [Feature Matrix — Storage Filters](feature-matrix.md#storage-filters) for details.
+
+### 20. I want to debug a contract on a remote server from VS Code
+
+**Cause:** The VS Code extension only connects to a debug server it spawns locally as a subprocess. The `soroban-debug remote` client mode is not exposed through the extension.
+
+**Workaround:** Use an SSH tunnel to bridge the remote server to your local machine:
+```bash
+# On the remote machine
+soroban-debug server --port 9229 --token $MY_TOKEN
+
+# On your local machine (in a separate terminal)
+ssh -L 9229:localhost:9229 user@remote-host
+```
+Then set `"port": 9229` and `"token": "$MY_TOKEN"` in your `launch.json`. The extension will connect to the tunnel as if the server were local.
+
+For full remote debugging documentation, see [Remote Debugging](remote-debugging.md) and the [Feature Matrix — Remote Debugging](feature-matrix.md#remote-debugging).

@@ -170,14 +170,126 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
     lines.join("\n")
 }
 
-/// Placeholder for instruction stepping
+/// Run instruction-level stepping mode.
 fn run_instruction_stepping(
-    _engine: &mut DebuggerEngine,
-    _function: &str,
-    _args: Option<&str>
+    engine: &mut DebuggerEngine,
+    function: &str,
+    args: Option<&str>,
 ) -> Result<()> {
-    print_info("Instruction stepping is not yet fully implemented");
+    logging::log_display("\n=== Instruction Stepping Mode ===", logging::LogLevel::Info);
+    logging::log_display("Type 'help' for available commands\n", logging::LogLevel::Info);
+
+    display_instruction_context(engine, 3);
+
+    loop {
+        print!("(step) > ");
+        std::io::Write::flush(&mut std::io::stdout())
+            .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
+        
+        let input = input.trim().to_lowercase();
+        let cmd = input.as_str();
+
+        let result = match cmd {
+            "n" | "next" | "s" | "step" | "into" | "" => engine.step_into(),
+            "o" | "over" => engine.step_over(),
+            "u" | "out" => engine.step_out(),
+            "b" | "block" => engine.step_block(),
+            "p" | "prev" | "back" => engine.step_back(),
+            "c" | "continue" => {
+                logging::log_display("Continuing execution...", logging::LogLevel::Info);
+                engine.continue_execution()?;
+                let res = engine.execute_without_breakpoints(function, args)?;
+                logging::log_display(format!("Execution completed. Result: {:?}", res), logging::LogLevel::Info);
+                break;
+            }
+            "i" | "info" => {
+                display_instruction_info(engine);
+                continue;
+            }
+            "ctx" | "context" => {
+                display_instruction_context(engine, 5);
+                continue;
+            }
+            "h" | "help" => {
+                logging::log_display(Formatter::format_stepping_help(), logging::LogLevel::Info);
+                continue;
+            }
+            "q" | "quit" | "exit" => {
+                logging::log_display("Exiting instruction stepping mode...", logging::LogLevel::Info);
+                break;
+            }
+            _ => {
+                logging::log_display(format!("Unknown command: {cmd}. Type 'help' for available commands."), logging::LogLevel::Info);
+                continue;
+            }
+        };
+
+        match result {
+            Ok(true) => display_instruction_context(engine, 3),
+            Ok(false) => {
+                let msg = if matches!(cmd, "p" | "prev" | "back") {
+                    "Cannot step back: no previous instruction"
+                } else {
+                    "Cannot step: execution finished or error occurred"
+                };
+                logging::log_display(msg, logging::LogLevel::Info);
+            }
+            Err(e) => logging::log_display(format!("Error stepping: {}", e), logging::LogLevel::Info),
+        }
+    }
+
     Ok(())
+}
+
+fn display_instruction_context(engine: &DebuggerEngine, context_size: usize) {
+    let context = engine.get_instruction_context(context_size);
+    let formatted = Formatter::format_instruction_context(&context, context_size);
+    logging::log_display(formatted, logging::LogLevel::Info);
+}
+
+fn display_instruction_info(engine: &DebuggerEngine) {
+    if let Ok(state) = engine.state().lock() {
+        let ip = state.instruction_pointer();
+        let step_mode = if ip.is_stepping() { Some(ip.step_mode()) } else { None };
+        
+        logging::log_display(
+            Formatter::format_instruction_pointer_state(
+                ip.current_index(),
+                ip.call_stack_depth(),
+                step_mode,
+                ip.is_stepping(),
+            ),
+            logging::LogLevel::Info,
+        );
+        logging::log_display(
+            Formatter::format_instruction_stats(
+                state.instructions().len(),
+                ip.current_index(),
+                state.step_count(),
+            ),
+            logging::LogLevel::Info,
+        );
+
+        if let Some(inst) = state.current_instruction() {
+            logging::log_display(
+                format!(
+                    "Current Instruction: {} (Offset: 0x{:08x}, Local index: {}, Control flow: {})",
+                    inst.name(),
+                    inst.offset,
+                    inst.local_index,
+                    inst.is_control_flow()
+                ),
+                logging::LogLevel::Info,
+            );
+        }
+    } else {
+        logging::log_display("Cannot access debug state", logging::LogLevel::Info);
+    }
 }
 
 /// Parse step mode from string
@@ -623,8 +735,11 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
         match engine.executor_mut().finish() {
             Ok((footprint, storage)) => {
+                #[allow(clippy::clone_on_copy)]
                 let mut footprint_map = std::collections::HashMap::new();
                 for (k, v) in &footprint.0 {
+                    #[allow(clippy::clone_on_copy)]
+                    footprint_map.insert(k.clone(), v.clone());
                     footprint_map.insert(k.clone(), *v);
                 }
 

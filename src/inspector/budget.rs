@@ -179,7 +179,7 @@ pub struct BudgetWarning {
 }
 
 /// Budget information snapshot
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BudgetInfo {
     pub cpu_instructions: u64,
     pub cpu_limit: u64,

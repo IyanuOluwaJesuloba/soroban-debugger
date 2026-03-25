@@ -41,6 +41,21 @@ impl SourceMap {
 
     /// Load debug info from WASM bytes and build the mapping
     pub fn load(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+        let obj = object::File::parse(wasm_bytes)
+            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to parse WASM object file: {}", e)))?;
+
+        let load_section =
+            |id: gimli::SectionId| -> std::result::Result<EndianSlice<RunTimeEndian>, gimli::Error> {
+                let data = obj
+                    .section_by_name(id.name())
+                    .or_else(|| obj.section_by_name(&format!(".{}", id.name())))
+                    .and_then(|s| s.data().ok())
+                    .unwrap_or(&[]);
+                Ok(EndianSlice::new(data, RunTimeEndian::Little))
+            };
+
+        let dwarf = Dwarf::load(&load_section)
+            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to load DWARF sections: {}", e)))?;
         self.offsets.clear();
         self.code_section_range = crate::utils::wasm::code_section_range(wasm_bytes)?;
 
@@ -54,10 +69,7 @@ impl SourceMap {
             }
         }
 
-        let load_section = |id: gimli::SectionId| -> std::result::Result<
-            EndianSlice<RunTimeEndian>,
-            gimli::Error,
-        > {
+        let load_section = |id: gimli::SectionId| -> std::result::Result<EndianSlice<RunTimeEndian>, gimli::Error> {
             let name = id.name();
             let data = custom_sections
                 .get(name)
@@ -88,6 +100,12 @@ impl SourceMap {
                     if let Some(file_path) =
                         self.get_file_path(&dwarf, &unit, header, row.file_index())
                     {
+                        // In WASM, DWARF addresses are usually offsets into the code section
+                        let offset = row.address() as usize;
+                        let line = row.line().map(|l: std::num::NonZeroU64| l.get() as u32).unwrap_or(0);
+                        let column = match row.column() {
+                            gimli::ColumnType::LeftEdge => None,
+                            gimli::ColumnType::Column(c) => Some(c.get() as u32),
                         let offset =
                             self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
                         let line = row.line().map(|l| l.get() as u32).unwrap_or(0);
@@ -208,5 +226,11 @@ impl SourceMap {
     /// Clear the source cache
     pub fn clear_cache(&mut self) {
         self.source_cache.clear();
+    }
+}
+
+impl Default for SourceMap {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -2,6 +2,7 @@ import { ChildProcess, execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
+import { WIRE_PROTOCOL_MAX_VERSION, WIRE_PROTOCOL_MIN_VERSION } from '../dap/protocol';
 
 export interface DebuggerProcessConfig {
   contractPath: string;
@@ -12,6 +13,8 @@ export interface DebuggerProcessConfig {
   binaryPath?: string;
   port?: number;
   token?: string;
+  requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
 }
 
 export type LaunchPreflightField =
@@ -176,6 +179,7 @@ export function resolveDebuggerBinaryPath(config: Pick<DebuggerProcessConfig, 'b
 }
 
 type DebugRequest =
+  | { type: 'Handshake'; client_name: string; client_version: string; protocol_min: number; protocol_max: number }
   | { type: 'Authenticate'; token: string }
   | { type: 'LoadContract'; contract_path: string }
   | { type: 'Execute'; function: string; args?: string }
@@ -201,6 +205,8 @@ type DebugRequest =
   | { type: 'GetCapabilities' };
 
 type DebugResponse =
+  | { type: 'HandshakeAck'; server_name: string; server_version: string; protocol_min: number; protocol_max: number; selected_version: number }
+  | { type: 'IncompatibleProtocol'; message: string; server_name: string; server_version: string; protocol_min: number; protocol_max: number }
   | { type: 'Authenticated'; success: boolean; message: string }
   | { type: 'ContractLoaded'; size: number }
   | { type: 'ExecutionResult'; success: boolean; output: string; error?: string; paused: boolean; completed: boolean }
@@ -245,6 +251,45 @@ type PendingRequest = {
   reject: (error: Error) => void;
 };
 
+export class DebuggerTimeoutError extends Error {
+  readonly requestType: string;
+  readonly timeoutMs: number;
+
+  constructor(requestType: string, timeoutMs: number) {
+    super(`Timed out waiting for debugger response to ${requestType} after ${timeoutMs}ms`);
+    this.name = 'DebuggerTimeoutError';
+    this.requestType = requestType;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function formatProtocolMismatchMessage(details: {
+  extensionVersion: string;
+  backendVersion?: string;
+  backendName?: string;
+  backendProtocolMin?: number;
+  backendProtocolMax?: number;
+  extra?: string;
+}): string {
+  const backendVersion = details.backendVersion || 'unknown';
+  const backendName = details.backendName || 'backend';
+  const backendRange = (details.backendProtocolMin !== undefined && details.backendProtocolMax !== undefined)
+    ? `[${details.backendProtocolMin}..=${details.backendProtocolMax}]`
+    : '(unknown range)';
+
+  const requestedRange = `[${WIRE_PROTOCOL_MIN_VERSION}..=${WIRE_PROTOCOL_MAX_VERSION}]`;
+
+  const lines = [
+    'Incompatible debugger protocol between VS Code extension and backend.',
+    `Extension version: ${details.extensionVersion} (expects protocol ${requestedRange})`,
+    `${backendName} version: ${backendVersion} (supports protocol ${backendRange})`,
+    details.extra ? `Details: ${details.extra}` : undefined,
+    'Remediation: upgrade the older component so both support at least one common protocol version.'
+  ].filter(Boolean);
+
+  return lines.join('\n');
+}
+
 export class DebuggerProcess {
   private process: ChildProcess | null = null;
   private socket: net.Socket | null = null;
@@ -253,9 +298,23 @@ export class DebuggerProcess {
   private pendingRequests = new Map<number, PendingRequest>();
   private config: DebuggerProcessConfig;
   private port: number | null = null;
+  private negotiatedProtocolVersion: number | null = null;
+  private defaultRequestTimeoutMs: number;
+  private defaultConnectTimeoutMs: number;
 
   constructor(config: DebuggerProcessConfig) {
     this.config = config;
+
+    const envRequestTimeout = Number(process.env.SOROBAN_DEBUG_REQUEST_TIMEOUT_MS);
+    const envConnectTimeout = Number(process.env.SOROBAN_DEBUG_CONNECT_TIMEOUT_MS);
+
+    this.defaultRequestTimeoutMs = Number.isFinite(config.requestTimeoutMs)
+      ? Number(config.requestTimeoutMs)
+      : (Number.isFinite(envRequestTimeout) ? envRequestTimeout : 30_000);
+
+    this.defaultConnectTimeoutMs = Number.isFinite(config.connectTimeoutMs)
+      ? Number(config.connectTimeoutMs)
+      : (Number.isFinite(envConnectTimeout) ? envConnectTimeout : 10_000);
   }
 
   async start(): Promise<void> {
@@ -276,39 +335,44 @@ export class DebuggerProcess {
     });
     this.process = child;
 
-    child.once('exit', () => {
-      this.rejectPendingRequests(new Error('Debugger server exited'));
-      this.socket?.destroy();
-      this.socket = null;
-    });
-
-    await this.waitForServer(port);
-    await this.connect(port);
-
-    if (this.config.token) {
-      const response = await this.sendRequest({
-        type: 'Authenticate',
-        token: this.config.token
+      child.once('exit', () => {
+        this.rejectPendingRequests(new Error('Debugger server exited'));
+        this.socket?.destroy();
+        this.socket = null;
       });
-      this.expectResponse(response, 'Authenticated');
-      if (!response.success) {
-        throw new Error(response.message);
+
+      await this.waitForServer(port);
+      await this.connect(port);
+      await this.negotiateProtocol();
+
+      if (this.config.token) {
+        const response = await this.sendRequest({
+          type: 'Authenticate',
+          token: this.config.token
+        });
+        this.expectResponse(response, 'Authenticated');
+        if (!response.success) {
+          throw new Error(response.message);
+        }
       }
-    }
 
-    if (this.config.snapshotPath) {
-      const response = await this.sendRequest({
-        type: 'LoadSnapshot',
-        snapshot_path: this.config.snapshotPath
+      if (this.config.snapshotPath) {
+        const response = await this.sendRequest({
+          type: 'LoadSnapshot',
+          snapshot_path: this.config.snapshotPath
+        });
+        this.expectResponse(response, 'SnapshotLoaded');
+      }
+
+      const contractResponse = await this.sendRequest({
+        type: 'LoadContract',
+        contract_path: this.config.contractPath
       });
-      this.expectResponse(response, 'SnapshotLoaded');
+      this.expectResponse(contractResponse, 'ContractLoaded');
+    } catch (error) {
+      await this.stop().catch(() => undefined);
+      throw error;
     }
-
-    const contractResponse = await this.sendRequest({
-      type: 'LoadContract',
-      contract_path: this.config.contractPath
-    });
-    this.expectResponse(contractResponse, 'ContractLoaded');
   }
 
   async execute(): Promise<DebuggerExecutionResult> {
@@ -444,11 +508,12 @@ export class DebuggerProcess {
     const binaryPath = resolveDebuggerBinaryPath(this.config);
 
     const output = await new Promise<string>((resolve, reject) => {
-      execFile(
+      const child = execFile(
         binaryPath,
         ['inspect', '--contract', this.config.contractPath, '--functions'],
         { env: process.env },
         (error, stdout, stderr) => {
+          clearTimeout(timer);
           if (error) {
             reject(new Error(stderr || stdout || String(error)));
             return;
@@ -456,6 +521,11 @@ export class DebuggerProcess {
           resolve(stdout);
         }
       );
+
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new DebuggerTimeoutError('InspectFunctions', this.defaultRequestTimeoutMs));
+      }, this.defaultRequestTimeoutMs);
     });
 
     const functions = new Set<string>();
@@ -511,6 +581,48 @@ export class DebuggerProcess {
     this.process = null;
   }
 
+  sendCommand(command: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (!this.process || !this.process.stdin || !this.process.stdout) {
+        reject(new Error('Debugger process not running'));
+        return;
+      }
+
+      const input = JSON.stringify({
+        id: Math.floor(Math.random() * 1000000),
+        request: command
+      }) + '\n';
+
+      const listener = (data: Buffer) => {
+        const lines = data.toString().split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const response = JSON.parse(line);
+            if (response.response && response.response.type === command.type + 'Result') {
+              this.process!.stdout!.removeListener('data', listener);
+              resolve(response.response);
+              return;
+            }
+          } catch (e) {
+            // ignore non-json
+          }
+        }
+      };
+
+      this.process.stdout.on('data', listener);
+      this.process.stdin.write(input);
+      
+      // Timeout after 10s
+      setTimeout(() => {
+        if (this.process && this.process.stdout) {
+          this.process.stdout.removeListener('data', listener);
+        }
+        reject(new Error('Command timeout'));
+      }, 10000);
+    });
+  }
+
   getInputStream() {
     return null;
   }
@@ -561,7 +673,7 @@ export class DebuggerProcess {
   }
 
   private async waitForServer(port: number): Promise<void> {
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + this.defaultConnectTimeoutMs;
 
     while (Date.now() < deadline) {
       if (this.process && this.process.exitCode !== null) {
@@ -626,7 +738,12 @@ export class DebuggerProcess {
         continue;
       }
 
-      const message = JSON.parse(line) as DebugMessage;
+      let message: DebugMessage;
+      try {
+        message = JSON.parse(line) as DebugMessage;
+      } catch {
+        continue;
+      }
       const pending = this.pendingRequests.get(message.id);
       if (!pending || !message.response) {
         continue;
@@ -637,7 +754,10 @@ export class DebuggerProcess {
     }
   }
 
-  private async sendRequest(request: DebugRequest): Promise<DebugResponse> {
+  private async sendRequest(
+    request: DebugRequest,
+    options: { timeoutMs?: number } = {}
+  ): Promise<DebugResponse> {
     if (!this.socket) {
       throw new Error('Debugger connection is not established');
     }
@@ -647,7 +767,22 @@ export class DebuggerProcess {
     const message: DebugMessage = { id, request };
 
     const responsePromise = new Promise<DebugResponse>((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
+      const timeoutMs = options.timeoutMs ?? this.defaultRequestTimeoutMs;
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new DebuggerTimeoutError(request.type, timeoutMs));
+      }, timeoutMs);
+
+      this.pendingRequests.set(id, {
+        resolve: (response) => {
+          clearTimeout(timer);
+          resolve(response);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
     });
 
     this.socket.write(`${JSON.stringify(message)}\n`);
@@ -656,6 +791,57 @@ export class DebuggerProcess {
       throw new Error(response.message);
     }
     return response;
+  }
+
+  private getExtensionVersion(): string {
+    try {
+      const packageJsonPath = path.resolve(__dirname, '..', '..', 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version?: string };
+      return pkg.version || 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private async negotiateProtocol(): Promise<void> {
+    const extensionVersion = this.getExtensionVersion();
+
+    let response: DebugResponse;
+    try {
+      response = await this.sendRequest({
+        type: 'Handshake',
+        client_name: 'vscode-extension',
+        client_version: extensionVersion,
+        protocol_min: WIRE_PROTOCOL_MIN_VERSION,
+        protocol_max: WIRE_PROTOCOL_MAX_VERSION
+      }, { timeoutMs: 2_500 });
+    } catch (error) {
+      throw new Error(formatProtocolMismatchMessage({
+        extensionVersion,
+        extra: String(error)
+      }));
+    }
+
+    if (response.type === 'HandshakeAck') {
+      this.negotiatedProtocolVersion = response.selected_version;
+      return;
+    }
+
+    if (response.type === 'IncompatibleProtocol') {
+      throw new Error(formatProtocolMismatchMessage({
+        extensionVersion,
+        backendName: response.server_name,
+        backendVersion: response.server_version,
+        backendProtocolMin: response.protocol_min,
+        backendProtocolMax: response.protocol_max,
+        extra: response.message
+      }));
+    }
+
+    throw new Error(formatProtocolMismatchMessage({
+      extensionVersion,
+      extra: `Unexpected handshake response: ${response.type}`
+    }));
   }
 
   private rejectPendingRequests(error: Error): void {

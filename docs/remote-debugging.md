@@ -4,6 +4,8 @@
 
 The Soroban Debugger supports remote debugging, allowing you to debug smart contracts running in CI environments, remote servers, or isolated systems from your local development machine. This enables powerful debugging workflows for production-like scenarios.
 
+> **Note: Remote client mode is CLI-only.** The `soroban-debug remote` command and TLS configuration are not available through the VS Code extension. The extension spawns and manages the debug server locally as a subprocess. If you need to debug against a remote server from VS Code, see the [VS Code Extension and Remote Mode](#vs-code-extension-and-remote-mode) section below. For a full breakdown of what each surface supports, see the [Feature Matrix](feature-matrix.md#remote-debugging).
+
 ## Architecture
 
 The remote debugging feature consists of three main components:
@@ -51,6 +53,8 @@ soroban-debug remote \
 
 ## Features
 
+> **VS Code Extension users:** When you launch a debug session in VS Code, the extension automatically starts `soroban-debug server` as a local subprocess and connects to it. The `port` and `token` fields in `launch.json` configure this local server. You cannot use the extension to connect to a pre-existing remote server — that requires the CLI `remote` command. TLS is not configurable from the extension. If you need TLS or remote-client connectivity, use the CLI directly or see the [VS Code Extension and Remote Mode](#vs-code-extension-and-remote-mode) section.
+
 ### Supported Debug Operations
 
 The debugger supports all core debugging operations over TCP:
@@ -94,9 +98,60 @@ soroban-debug server --port 9229 \
   --token myToken
 ```
 
+### VS Code Extension and Remote Mode
+
+The VS Code extension uses the debug server protocol internally, but does not expose
+the full remote client capability to users:
+
+| Capability | CLI | VS Code Extension |
+|---|---|---|
+| Start server (listen on port) | `soroban-debug server --port N` | Automatic — extension-managed |
+| Configure server port | `--port N` | `"port"` in `launch.json` |
+| Configure auth token | `--token T` on `server` | `"token"` in `launch.json` |
+| Connect to remote server | `soroban-debug remote --remote host:N` | **Not supported** |
+| TLS encryption | `--tls-cert` / `--tls-key` | **Not supported** |
+
+**Workaround for VS Code users who need a remote server:** use an SSH tunnel to
+forward the remote port to your local machine, then configure the extension to
+connect to the local end of the tunnel:
+
+```bash
+# On the remote machine
+soroban-debug server --port 9229 --token $MY_TOKEN
+
+# On your local machine (in a separate terminal)
+ssh -L 9229:localhost:9229 user@remote-host
+```
+
+Then in your `.vscode/launch.json`:
+```json
+{
+  "type": "soroban",
+  "request": "launch",
+  "name": "Debug via SSH tunnel",
+  "contractPath": "${workspaceFolder}/contract.wasm",
+  "port": 9229,
+  "token": "${env:MY_TOKEN}"
+}
+```
+
+The extension will connect through the tunnel as if the server were local. Note
+that the extension still manages the server subprocess normally — the tunnel
+approach is for pointing the extension at a manually started remote server by
+binding the same port locally.
+
 ## Wire Protocol
 
 The debug protocol uses JSON messages over TCP with line-delimited encoding.
+
+### Protocol Compatibility Matrix
+
+The backend and adapter negotiate a protocol version during the required `Handshake` request.
+If there is no overlap in supported versions, the session fails fast with an actionable error.
+
+| Wire protocol | Backend (`soroban-debug`) | VS Code extension | Notes |
+| --- | --- | --- | --- |
+| 1 | >= 0.1.0 | >= 0.1.0 | Handshake required; highest common version selected |
 
 ### Message Format
 
@@ -115,6 +170,20 @@ The debug protocol uses JSON messages over TCP with line-delimited encoding.
 ```
 
 ### Request Types
+
+#### Handshake (Required)
+
+Clients MUST negotiate a compatible protocol version before issuing other debug requests.
+
+```json
+{
+  "type": "Handshake",
+  "client_name": "vscode-extension",
+  "client_version": "0.1.0",
+  "protocol_min": 1,
+  "protocol_max": 1
+}
+```
 
 #### Authenticate
 ```json
@@ -185,6 +254,30 @@ The debug protocol uses JSON messages over TCP with line-delimited encoding.
 ```
 
 ### Response Types
+
+#### HandshakeAck
+```json
+{
+  "type": "HandshakeAck",
+  "server_name": "soroban-debug",
+  "server_version": "0.1.0",
+  "protocol_min": 1,
+  "protocol_max": 1,
+  "selected_version": 1
+}
+```
+
+#### IncompatibleProtocol
+```json
+{
+  "type": "IncompatibleProtocol",
+  "message": "Protocol mismatch: ... Upgrade the older component.",
+  "server_name": "soroban-debug",
+  "server_version": "0.1.0",
+  "protocol_min": 1,
+  "protocol_max": 1
+}
+```
 
 #### Authenticated
 ```json
@@ -383,7 +476,7 @@ Planned features for remote debugging:
 
 To contribute to remote debugging features:
 
-1. Review the [CONTRIBUTION.md](../CONTRIBUTION.md) guide
+1. Review the [CONTRIBUTING.md](../CONTRIBUTING.md) guide
 2. Check existing issues tagged `remote-debugging`
 3. Propose enhancements in GitHub Discussions
 4. Submit PRs with tests and documentation

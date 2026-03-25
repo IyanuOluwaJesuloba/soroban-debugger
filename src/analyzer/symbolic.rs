@@ -127,7 +127,7 @@ impl SymbolicAnalyzer {
                             ))
                         })?;
                         if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
-                            imported_function_count += 1;
+                            imported_func_count += 1;
                         }
                     }
                 }
@@ -156,19 +156,7 @@ impl SymbolicAnalyzer {
                         })?);
                     }
                 }
-                Payload::ImportSection(reader) => {
-                    for import in reader {
-                        let import = import.map_err(|e| {
-                            DebuggerError::WasmLoadError(format!(
-                                "Failed to read import section: {}",
-                                e
-                            ))
-                        })?;
-                        if let wasmparser::TypeRef::Func(_) = import.ty {
-                            imported_func_count += 1;
-                        }
-                    }
-                }
+
                 Payload::ExportSection(reader) => {
                     for export in reader {
                         let export = export.map_err(|e| {
@@ -305,7 +293,6 @@ fn toml_basic_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     fn push_u32_leb(mut value: u32, out: &mut Vec<u8>) {
         loop {

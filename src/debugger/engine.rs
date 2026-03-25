@@ -11,6 +11,11 @@ use crate::Result;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+pub struct StepOverResult {
+    pub paused: bool,
+    pub location: Option<SourceLocation>,
+}
+
 /// Core debugging engine that orchestrates execution and debugging.
 pub struct DebuggerEngine {
     executor: ContractExecutor,
@@ -18,6 +23,7 @@ pub struct DebuggerEngine {
     state: Arc<Mutex<DebugState>>,
     stepper: Stepper,
     instrumenter: Instrumenter,
+    source_map: SourceMap,
     source_map: Option<SourceMap>,
     paused: bool,
     instruction_debug_enabled: bool,
@@ -40,6 +46,7 @@ impl DebuggerEngine {
             state: Arc::new(Mutex::new(DebugState::new())),
             stepper: Stepper::new(),
             instrumenter: Instrumenter::new(),
+            source_map: SourceMap::new(),
             source_map: None,
             paused: false,
             instruction_debug_enabled: false,
@@ -92,6 +99,10 @@ impl DebuggerEngine {
         self.instrumenter.enable();
         self.instruction_debug_enabled = true;
         Ok(())
+    }
+
+    pub fn load_source_map(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+        self.source_map.load(wasm_bytes)
     }
 
     /// Disable instruction-level debugging.
@@ -153,8 +164,23 @@ impl DebuggerEngine {
             &mut plugin_ctx,
         );
 
-        if check_breakpoints && self.breakpoints.should_break(function) {
-            self.pause_at_function(function);
+        let (step_count, current_args) = self
+            .state
+            .lock()
+            .map(|s| (s.step_count(), s.current_args().map(String::from)))
+            .unwrap_or((0, None));
+
+        if check_breakpoints {
+            if let Some(bp) = self.breakpoints().get_breakpoint(function) {
+                if let Some(condition) = &bp.condition {
+                    if condition.evaluate(step_count, current_args.as_deref().or(args)) {
+                        let cond_str = format!("{:?}", condition);
+                        self.pause_at_function(function, Some(cond_str));
+                    }
+                } else {
+                    self.pause_at_function(function, None);
+                }
+            }
         }
 
         let start_time = std::time::Instant::now();
@@ -203,10 +229,15 @@ impl DebuggerEngine {
         let mut plugin_ctx = EventContext::new();
         plugin_ctx.stack_depth = 1;
         plugin_ctx.is_paused = true;
+        let condition = self
+            .breakpoints
+            .get_breakpoint(function)
+            .and_then(|bp| bp.condition.as_ref().map(|c| format!("{:?}", c)));
+
         crate::plugin::registry::dispatch_global_event(
             &ExecutionEvent::BreakpointHit {
                 function: function.to_string(),
-                condition: None,
+                condition,
             },
             &mut plugin_ctx,
         );
@@ -297,6 +328,27 @@ impl DebuggerEngine {
         Ok(stepped)
     }
 
+    pub fn step_over_source_line(&mut self) -> Result<StepOverResult> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let (paused, location) = if let Ok(mut state) = self.state.lock() {
+            let advanced = self
+                .stepper
+                .step_over_source_line(&mut state, &self.source_map);
+            let loc = state
+                .current_instruction()
+                .and_then(|i| self.source_map.lookup(i.offset));
+            (advanced, loc)
+        } else {
+            (false, None)
+        };
+
+        self.paused = paused;
+        Ok(StepOverResult { paused, location })
+    }
+
     /// Step out of current function.
     pub fn step_out(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
@@ -372,7 +424,7 @@ impl DebuggerEngine {
         Ok(())
     }
 
-    fn pause_at_function(&mut self, function: &str) {
+    fn pause_at_function(&mut self, function: &str, condition: Option<String>) {
         crate::logging::log_breakpoint(function);
         self.paused = true;
 
@@ -386,7 +438,7 @@ impl DebuggerEngine {
         crate::plugin::registry::dispatch_global_event(
             &ExecutionEvent::BreakpointHit {
                 function: function.to_string(),
-                condition: None,
+                condition,
             },
             &mut plugin_ctx,
         );

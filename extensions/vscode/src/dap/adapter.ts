@@ -70,7 +70,9 @@ export class SorobanDebugSession extends DebugSession {
         trace: args.trace || false,
         binaryPath: args.binaryPath,
         port: args.port,
-        token: args.token
+        token: args.token,
+        requestTimeoutMs: args.requestTimeoutMs,
+        connectTimeoutMs: args.connectTimeoutMs
       });
 
       await this.debuggerProcess.start();
@@ -89,9 +91,12 @@ export class SorobanDebugSession extends DebugSession {
       this.attachProcessListeners();
       this.sendResponse(response);
     } catch (error) {
+      const message = error instanceof DebuggerTimeoutError
+        ? `Failed to launch debugger (timeout): ${error.message}\n\nNext steps: ensure the backend process is running, reachable, and not stalled; then retry the session.`
+        : `Failed to launch debugger: ${error}`;
       this.sendErrorResponse(response, {
         id: 1001,
-        format: `Failed to launch debugger: ${error}`,
+        format: message,
         showUser: true
       });
     }
@@ -246,6 +251,73 @@ export class SorobanDebugSession extends DebugSession {
     this.sendResponse(response);
   }
 
+  protected async evaluateRequest(
+    response: DebugProtocol.EvaluateResponse,
+    args: DebugProtocol.EvaluateArguments
+  ): Promise<void> {
+    const expression = (args.expression || '').trim();
+
+    try {
+      if (this.debuggerProcess && this.state.isPaused) {
+        await this.refreshState();
+      }
+
+      if (expression === 'args' || expression === 'Arguments') {
+        response.body = {
+          result: this.state.args ?? '(none)',
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression === 'storage' || expression === 'Storage') {
+        const storageObject = Object.fromEntries(
+          (this.state.variables || []).map((v) => [v.name, v.value])
+        );
+        response.body = {
+          result: JSON.stringify(storageObject),
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression.startsWith('storage.')) {
+        const key = expression.slice('storage.'.length);
+        const match = (this.state.variables || []).find((v) => v.name === key);
+        if (!match) {
+          throw new Error(`Unknown storage key: ${key}`);
+        }
+        response.body = {
+          result: match.value,
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      throw new Error('Unsupported expression. Try `args`, `storage`, or `storage.<key>`.');
+    } catch (error) {
+      if (error instanceof DebuggerTimeoutError) {
+        this.sendErrorResponse(response, {
+          id: 1010,
+          format:
+            `Evaluate timed out (${error.requestType}). The backend may be stalled.\n\n` +
+            `Next steps: restart the debug session; if it persists, verify the backend binary and connectivity.`,
+          showUser: true
+        });
+        return;
+      }
+
+      this.sendErrorResponse(response, {
+        id: 1010,
+        format: `Evaluate failed: ${error}`,
+        showUser: false
+      });
+    }
+  }
+
   protected async continueRequest(
     response: DebugProtocol.ContinueResponse,
     args: DebugProtocol.ContinueArguments
@@ -278,6 +350,17 @@ export class SorobanDebugSession extends DebugSession {
       this.sendEvent(new ExitedEvent(0));
       await this.stop();
     } catch (error) {
+      if (error instanceof DebuggerTimeoutError) {
+        this.sendEvent(new LogOutputEvent(
+          `Debugger request timed out (${error.requestType}). The backend may be stalled or the connection is unhealthy.\n` +
+          `Next steps: restart the debug session; if it persists, verify the backend binary and network connectivity.\n`,
+          LogLevel.Error
+        ));
+        this.sendEvent(new ExitedEvent(1));
+        await this.stop();
+        return;
+      }
+
       this.sendErrorResponse(response, {
         id: 1002,
         format: `Continue failed: ${error}`,
@@ -290,6 +373,25 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.NextResponse,
     args: DebugProtocol.NextArguments
   ): Promise<void> {
+    if (!this.debuggerProcess) {
+      this.sendResponse(response);
+      return;
+    }
+
+    try {
+      const result = await this.debuggerProcess.sendCommand({
+        type: 'StepOverLine'
+      });
+      
+      this.sendResponse(response);
+
+      if (result && result.paused) {
+        this.state.isPaused = true;
+        this.sendEvent(new StoppedEvent('step', this.threadId));
+      }
+    } catch (e) {
+      this.sendResponse(response);
+    }
     await this.stepOnce(response, 'next');
   }
 
@@ -323,13 +425,32 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.ConfigurationDoneResponse,
     args: DebugProtocol.ConfigurationDoneArguments
   ): Promise<void> {
-    if (this.debuggerProcess) {
-      await this.refreshState();
-      this.state.isPaused = true;
-      this.sendEvent(new StoppedEvent('entry', this.threadId));
-    }
+    try {
+      if (this.debuggerProcess) {
+        await this.refreshState();
+        this.state.isPaused = true;
+        this.sendEvent(new StoppedEvent('entry', this.threadId));
+      }
+      this.sendResponse(response);
+    } catch (error) {
+      if (error instanceof DebuggerTimeoutError) {
+        this.sendEvent(new LogOutputEvent(
+          `[timeout] configurationDone refresh timed out (${error.requestType}).\n` +
+          `Next steps: restart the debug session.\n`,
+          LogLevel.Error
+        ));
+        this.sendEvent(new ExitedEvent(1));
+        await this.stop();
+        this.sendResponse(response);
+        return;
+      }
 
-    this.sendResponse(response);
+      this.sendErrorResponse(response, {
+        id: 1009,
+        format: `Configuration failed: ${error}`,
+        showUser: true
+      });
+    }
   }
 
   protected async evaluateRequest(
@@ -463,6 +584,17 @@ export class SorobanDebugSession extends DebugSession {
       this.sendEvent(new ExitedEvent(0));
       await this.stop();
     } catch (error) {
+      if (error instanceof DebuggerTimeoutError) {
+        this.sendEvent(new LogOutputEvent(
+          `${label} timed out (${error.requestType}). The backend may be stalled.\n` +
+          `Next steps: restart the debug session.\n`,
+          LogLevel.Error
+        ));
+        this.sendEvent(new ExitedEvent(1));
+        await this.stop();
+        return;
+      }
+
       this.sendEvent(new LogOutputEvent(`${label} failed: ${error}\n`, LogLevel.Error));
     }
   }

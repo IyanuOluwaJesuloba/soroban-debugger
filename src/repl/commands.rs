@@ -18,12 +18,31 @@ pub enum ReplCommand {
     Help,
     /// Exit REPL: exit
     Exit,
+    /// Set a breakpoint: break <function> [condition]
+    Break {
+        function: String,
+        condition: Option<String>,
+    },
+    /// List breakpoints: list-breaks
+    ListBreaks,
+    /// Clear a breakpoint: clear-break <function>
+    ClearBreak { function: String },
 }
 
 impl ReplCommand {
     /// Built-in REPL commands for completion
     pub fn builtins() -> &'static [&'static str] {
         &[
+            "call",
+            "storage",
+            "history",
+            "clear",
+            "help",
+            "exit",
+            "quit",
+            "break",
+            "list-breaks",
+            "clear-break",
             "call", "storage", "history", "clear", "help", "exit", "quit",
         ]
     }
@@ -45,6 +64,29 @@ impl ReplCommand {
                 let function = parts[1].to_string();
                 let args = parts[2..].iter().map(|s| s.to_string()).collect();
                 Ok(ReplCommand::Call { function, args })
+            }
+            "break" => {
+                if parts.len() < 2 {
+                    return Err(miette::miette!("break requires a function name"));
+                }
+                let function = parts[1].to_string();
+                let condition = if parts.len() > 2 {
+                    Some(parts[2..].join(" "))
+                } else {
+                    None
+                };
+                Ok(ReplCommand::Break {
+                    function,
+                    condition,
+                })
+            }
+            "list-breaks" => Ok(ReplCommand::ListBreaks),
+            "clear-break" => {
+                if parts.len() < 2 {
+                    return Err(miette::miette!("clear-break requires a function name"));
+                }
+                let function = parts[1].to_string();
+                Ok(ReplCommand::ClearBreak { function })
             }
             "storage" => Ok(ReplCommand::Storage),
             "history" => Ok(ReplCommand::History),

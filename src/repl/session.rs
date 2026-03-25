@@ -227,6 +227,36 @@ impl ReplSession {
                 print!("\x1B[2J\x1B[1;1H");
                 Ok(false)
             }
+            ReplCommand::Break { function, condition } => {
+                self.executor
+                    .add_breakpoint(&function, condition.as_deref())?;
+                tracing::info!("{}", Formatter::success(format!("Breakpoint set: {}", function).as_str()));
+                Ok(false)
+            }
+            ReplCommand::ListBreaks => {
+                let breaks = self.executor.list_breakpoints();
+                if breaks.is_empty() {
+                    tracing::info!("{}", Formatter::info("No breakpoints set"));
+                } else {
+                    tracing::info!("{}", Formatter::success("Breakpoints:"));
+                    for bp in breaks {
+                        let cond = bp
+                            .condition
+                            .map(|c| format!(" (if {:?})", c))
+                            .unwrap_or_default();
+                        tracing::info!("  - {}{}", bp.function, cond);
+                    }
+                }
+                Ok(false)
+            }
+            ReplCommand::ClearBreak { function } => {
+                if self.executor.remove_breakpoint(&function) {
+                    tracing::info!("{}", Formatter::success(format!("Breakpoint cleared: {}", function).as_str()));
+                } else {
+                    tracing::info!("{}", Formatter::info(format!("No breakpoint found: {}", function).as_str()));
+                }
+                Ok(false)
+            }
         }
     }
 
@@ -262,6 +292,18 @@ impl ReplSession {
         tracing::info!(
             "  {}                     Show this help message",
             Formatter::info("help")
+        );
+        tracing::info!(
+            "  {} <func> [cond] Set a breakpoint with optional condition",
+            Formatter::info("break")
+        );
+        tracing::info!(
+            "  {}                 List all active breakpoints",
+            Formatter::info("list-breaks")
+        );
+        tracing::info!(
+            "  {} <func>         Clear a specific breakpoint",
+            Formatter::info("clear-break")
         );
         tracing::info!(
             "  {}                     Exit the REPL",

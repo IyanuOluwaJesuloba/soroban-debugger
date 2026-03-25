@@ -22,6 +22,9 @@ pub struct BatchItem {
     /// Optional label for this test case
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// When true, use exact string match; when false (default), use semantic comparison
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +36,8 @@ enum BatchItemInput {
         expected: Option<Value>,
         #[serde(default)]
         label: Option<String>,
+        #[serde(default)]
+        strict: bool,
     },
     RawArgs(Value),
 }
@@ -69,7 +74,7 @@ pub struct BatchExecutor {
 
 // Thread-local storage for executors to avoid re-initialization
 thread_local! {
-    static THREAD_EXECUTOR: RefCell<Option<(Arc<Vec<u8>>, ContractExecutor)>> = RefCell::new(None);
+    static THREAD_EXECUTOR: RefCell<Option<(Arc<Vec<u8>>, ContractExecutor)>> = const { RefCell::new(None) };
 }
 
 impl BatchExecutor {
@@ -152,7 +157,7 @@ impl BatchExecutor {
         let duration = start.elapsed().as_millis();
 
         let passed = if let Some(expected) = &item.expected {
-            success && result_str == *expected
+            success && values_match(&result_str, expected, item.strict)
         } else {
             success
         };
@@ -296,21 +301,73 @@ impl BatchExecutor {
     }
 }
 
+/// Compare a result against an expected value.
+///
+/// In loose mode (default, `strict = false`):
+/// - If both strings parse as valid JSON, compare the decoded values so that
+///   formatting differences (`{"a":1}` vs `{ "a": 1 }`) and equivalent number
+///   representations (`1` vs `1.0`) are treated as equal.
+/// - Otherwise fall back to trimmed-string comparison.
+///
+/// In strict mode (`strict = true`) the raw strings must be identical.
+fn values_match(result: &str, expected: &str, strict: bool) -> bool {
+    if strict {
+        return result == expected;
+    }
+
+    // Semantic JSON comparison
+    if let (Ok(r), Ok(e)) = (
+        serde_json::from_str::<Value>(result),
+        serde_json::from_str::<Value>(expected),
+    ) {
+        return json_values_equal(&r, &e);
+    }
+
+    // Fallback: whitespace-normalised string comparison
+    result.trim() == expected.trim()
+}
+
+/// Recursively compare two JSON values, treating numerically equal numbers as
+/// equal regardless of whether they were parsed as integers or floats
+/// (e.g. `1` and `1.0` are considered the same).
+fn json_values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(n1), Value::Number(n2)) => n1.as_f64() == n2.as_f64(),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| json_values_equal(x, y))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|bv| json_values_equal(v, bv)))
+        }
+        _ => a == b,
+    }
+}
+
 impl From<BatchItemInput> for BatchItem {
     fn from(value: BatchItemInput) -> Self {
         match value {
-            BatchItemInput::RawArgs(args) =>
-                Self {
-                    args: json_value_to_text(args),
-                    expected: None,
-                    label: None,
-                },
-            BatchItemInput::Structured { args, expected, label } =>
-                Self {
-                    args: json_value_to_text(args),
-                    expected: expected.map(json_value_to_text),
-                    label,
-                },
+            BatchItemInput::RawArgs(args) => Self {
+                args: json_value_to_text(args),
+                expected: None,
+                label: None,
+                strict: false,
+            },
+            BatchItemInput::Structured {
+                args,
+                expected,
+                label,
+                strict,
+            } => Self {
+                args: json_value_to_text(args),
+                expected: expected.map(json_value_to_text),
+                label,
+                strict,
+            },
         }
     }
 }
@@ -352,6 +409,43 @@ mod tests {
         assert_eq!(items[0].label, Some("Add 1+2".to_string()));
         assert_eq!(items[1].args, "[5, 10]");
         assert_eq!(items[1].expected, None);
+    }
+
+    #[test]
+    fn test_values_match_loose_json() {
+        // Different whitespace / key order still matches in loose mode
+        assert!(values_match(r#"{"a":1,"b":2}"#, r#"{ "b": 2, "a": 1 }"#, false));
+        assert!(values_match("42", "42", false));
+        // Equivalent numeric representations
+        assert!(values_match("1", "1.0", false));
+        // Trailing whitespace
+        assert!(values_match("hello ", "hello", false));
+    }
+
+    #[test]
+    fn test_values_match_strict() {
+        // Strict mode: exact bytes must match
+        assert!(values_match("42", "42", true));
+        assert!(!values_match(r#"{"a":1}"#, r#"{ "a": 1 }"#, true));
+        assert!(!values_match("hello ", "hello", true));
+    }
+
+    #[test]
+    fn test_values_match_non_json_loose() {
+        // Non-JSON falls back to trimmed comparison
+        assert!(values_match("  ok  ", "ok", false));
+        assert!(!values_match("ok", "fail", false));
+    }
+
+    #[test]
+    fn test_batch_item_strict_field() {
+        let json = r#"[
+            {"args": "[1]", "expected": "1", "strict": true},
+            {"args": "[2]", "expected": "2"}
+        ]"#;
+        let items: Vec<BatchItem> = serde_json::from_str(json).unwrap();
+        assert!(items[0].strict);
+        assert!(!items[1].strict);
     }
 
     #[test]

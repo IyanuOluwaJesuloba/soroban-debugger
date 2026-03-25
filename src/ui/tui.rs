@@ -159,7 +159,7 @@ impl DebuggerUI {
                 }
             }
             "list-breaks" => {
-                let breakpoints = self.engine.breakpoints_mut().list();
+                let breakpoints = self.engine.breakpoints_mut().list_detailed();
                 if breakpoints.is_empty() {
                     crate::logging::log_display(
                         "No breakpoints set",
@@ -167,8 +167,9 @@ impl DebuggerUI {
                     );
                 } else {
                     for bp in breakpoints {
+                        let cond_str = bp.condition.map(|c| format!(" (if {:?})", c)).unwrap_or_default();
                         crate::logging::log_display(
-                            format!("- {}", bp),
+                            format!("- {}{}", bp.function, cond_str),
                             crate::logging::LogLevel::Info,
                         );
                     }
@@ -265,7 +266,7 @@ impl DebuggerUI {
             crate::logging::LogLevel::Info,
         );
         crate::logging::log_display(
-            "  break <func>       Set breakpoint",
+            "  break <func> [cond] Set breakpoint with optional condition",
             crate::logging::LogLevel::Info,
         );
         crate::logging::log_display(

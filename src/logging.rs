@@ -59,7 +59,7 @@ pub fn log_execution_complete(result: &str) {
 
 /// Log breakpoint event.
 pub fn log_breakpoint(function: &str) {
-    tracing::debug!(function, "Breakpoint paused");
+    tracing::info!(function, "Breakpoint hit");
 }
 
 /// Log storage access.
@@ -113,11 +113,11 @@ pub fn log_interactive_mode_start() {
 
 /// Log breakpoint operations.
 pub fn log_breakpoint_set(function: &str) {
-    tracing::debug!(function, "Breakpoint set");
+    tracing::info!(function, "Breakpoint set");
 }
 
 pub fn log_breakpoint_cleared(function: &str) {
-    tracing::debug!(function, "Breakpoint cleared");
+    tracing::info!(function, "Breakpoint cleared");
 }
 
 /// Log repeated execution start.

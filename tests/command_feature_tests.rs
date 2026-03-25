@@ -400,3 +400,33 @@ fn repl_seeds_initial_storage() {
         combined
     );
 }
+
+#[test]
+fn repl_supports_conditional_breakpoints() {
+    let wasm = fixture_wasm("counter");
+    let output = Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "info")
+        .args(["repl", "--contract", wasm.to_str().unwrap()])
+        .write_stdin("break increment step_count > 0\ncall increment\ncall increment\nexit\n")
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        combined.contains("Breakpoint set") && combined.contains("increment"),
+        "Breakpoint was not set correctly in REPL\n{}",
+        combined
+    );
+
+    assert!(
+        combined.contains("Execution paused") && combined.contains("increment"),
+        "Conditional breakpoint was not hit in REPL\n{}",
+        combined
+    );
+}

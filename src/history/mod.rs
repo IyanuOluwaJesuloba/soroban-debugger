@@ -179,13 +179,15 @@ impl HistoryManager {
         // single-record list, destroying all salvageable data.
         let history: Vec<RunHistory> = serde_json::from_reader(reader).map_err(|e| {
             DebuggerError::FileError(format!(
-                "History file {:?} could not be parsed ({}). \
+                "History file \"{}\" could not be parsed ({}). \
                  The file may be corrupt or was written by an incompatible version. \
                  Recovery options:\n\
-                 \x20 1. Inspect the file with `cat {:?}` and fix any JSON syntax errors.\n\
-                 \x20 2. Back up and remove the file (`mv {:?} {:?}.bak`) to start fresh.\n\
+                 \x20 1. Inspect the file with `cat \"{}\"` and fix any JSON syntax errors.\n\
+                 \x20 2. Back up and remove the file (`mv \"{}\" \"{}.bak\"`) to start fresh.\n\
                  \x20 3. Restore from a previous backup if one exists.",
-                self.file_path, e, self.file_path, self.file_path, self.file_path,
+                self.file_path.display(), e,
+                self.file_path.display(),
+                self.file_path.display(), self.file_path.display(),
             ))
         })?;
         Ok(history)
@@ -412,16 +414,14 @@ mod tests {
     fn make_record(date: &str, cpu: u64, mem: u64) -> RunHistory {
         RunHistory {
             date: date.into(),
-    #[test]
-    fn test_regression_detection() {
-        let p1 = RunHistory {
-            date: "2026-01-01T00:00:00Z".into(),
             contract_hash: "hash".into(),
             function: "func".into(),
             cpu_used: cpu,
             memory_used: mem,
         }
     }
+
+
 
     // ── load_history — corrupt file tests (the requested verification) ───────
 

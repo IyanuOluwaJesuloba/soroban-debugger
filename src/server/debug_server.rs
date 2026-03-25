@@ -1,3 +1,5 @@
+use crate::debugger::engine::{DebuggerEngine, StepOverResult};
+use crate::runtime::executor::ContractExecutor;
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::breakpoint::{BreakpointManager, BreakpointSpec};
 use crate::inspector::budget::BudgetInspector;
@@ -87,6 +89,7 @@ impl DebugServer {
         S: tokio::io::AsyncRead + AsyncWriteExt + Unpin,
     {
         let mut authenticated = self.token.is_none();
+        let mut handshake_done = false;
         let (reader, mut writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
@@ -116,6 +119,63 @@ impl DebugServer {
 
             if matches!(request, DebugRequest::Ping) {
                 let response = DebugMessage::response(message.id, DebugResponse::Pong);
+                send_response(&mut writer, response).await?;
+                continue;
+            }
+
+            if let DebugRequest::Handshake {
+                client_name,
+                client_version,
+                protocol_min,
+                protocol_max,
+            } = &request
+            {
+                let server_name = "soroban-debug".to_string();
+                let server_version = env!("CARGO_PKG_VERSION").to_string();
+
+                match negotiate_protocol_version(*protocol_min, *protocol_max) {
+                    Ok(selected_version) => {
+                        handshake_done = true;
+                        let response = DebugMessage::response(
+                            message.id,
+                            DebugResponse::HandshakeAck {
+                                server_name,
+                                server_version,
+                                protocol_min: PROTOCOL_MIN_VERSION,
+                                protocol_max: PROTOCOL_MAX_VERSION,
+                                selected_version,
+                            },
+                        );
+                        send_response(&mut writer, response).await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        let response = DebugMessage::response(
+                            message.id,
+                            DebugResponse::IncompatibleProtocol {
+                                message: format!(
+                                    "{}. Client: {}@{}. Upgrade the older component.",
+                                    e, client_name, client_version
+                                ),
+                                server_name,
+                                server_version,
+                                protocol_min: PROTOCOL_MIN_VERSION,
+                                protocol_max: PROTOCOL_MAX_VERSION,
+                            },
+                        );
+                        send_response(&mut writer, response).await?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            if !handshake_done {
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::Error {
+                        message: "Protocol handshake required: send a Handshake request before other debug requests.".to_string(),
+                    },
+                );
                 send_response(&mut writer, response).await?;
                 continue;
             }
@@ -378,6 +438,50 @@ impl DebugServer {
                             }
                         }
                     }
+                }
+            }
+
+            DebugRequest::StepOverLine => {
+                if let Some(engine) = &session.engine {
+                    let mut engine = engine.lock().map_err(|e| {
+                        DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
+                    })?;
+
+                    match engine.step_over_source_line() {
+                        Ok(StepOverResult { paused, location }) => {
+                            DebugResponse::StepOverLineResult {
+                                paused,
+                                file: location
+                                    .as_ref()
+                                    .map(|l| l.file.to_string_lossy().into_owned()),
+                                line: location.as_ref().map(|l| l.line),
+                                column: location.and_then(|l| l.column),
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: format!("StepOverLine failed: {}", e),
+                        },
+                    }
+                } else {
+                    DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    }
+                }
+            }
+
+            DebugRequest::Continue => {
+                if let Some(engine) = &session.engine {
+                    let mut engine = engine.lock().map_err(|e| {
+                        DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
+                    })?;
+
+                    match engine.continue_execution() {
+                        Ok(_) => {
+                            // Execution completed
+                            DebugResponse::ContinueResult {
+                                completed: true,
+                                output: None,
+                                error: None,
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },

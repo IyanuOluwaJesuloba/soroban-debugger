@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_breakpoint() {
+    fn test_conditional_breakpoint() {
         let mut manager = BreakpointManager::new();
         manager.add_simple("transfer");
         assert!(manager.remove("transfer"));
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_breakpoints() {
+    fn test_remove_breakpoint() {
         let mut manager = BreakpointManager::new();
         manager.add_simple("transfer");
         manager.add_simple("mint");

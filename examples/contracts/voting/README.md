@@ -2,7 +2,7 @@
 
 This example demonstrates a complex storage pattern in a Soroban smart contract, designed to showcase the capabilities of the `soroban-debugger`.
 
-For information on how to contribute to this project, please see the [CONTRIBUTING.md](../../../CONTRIBUTION.md).
+For information on how to contribute to this project, please see the [CONTRIBUTING.md](../../../CONTRIBUTING.md).
 
 The contract implements a simple voting system where proposals can be created, voted on, and tallied. It uses persistent storage to track proposals and a map of votes for each proposal.
 
