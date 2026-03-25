@@ -517,8 +517,8 @@ impl SecurityRule for UnboundedIterationRule {
 struct UnboundedStaticSignal {
     suspicious: bool,
     storage_calls_inside_loops: usize,
-    confidence: Option<FindingConfidence>,
-    context: Option<FindingContext>,
+    confidence: Option<f32>,
+    rationale: Option<String>,
     loop_types: Vec<String>,
     max_nesting_depth: usize,
 }
@@ -659,43 +659,28 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
     signal.loop_types = loop_types_seen.into_iter().collect();
 
     // Calculate confidence based on multiple factors
-    let confidence_level = if storage_calls_in_loops > 0 {
+    let confidence = if storage_calls_in_loops > 0 {
         if signal.max_nesting_depth >= 2 && storage_calls_in_loops >= 3 {
-            ConfidenceLevel::High
+            0.9
         } else if signal.max_nesting_depth > 1 || storage_calls_in_loops > 1 {
-            ConfidenceLevel::Medium
+            0.7
         } else {
-            ConfidenceLevel::Low
+            0.5
         }
     } else {
-        ConfidenceLevel::Low
+        0.2
     };
 
-    let confidence_rationale = format!(
+    signal.rationale = Some(format!(
         "Storage calls in loops: {}, max nesting depth: {}, loop types with calls: {:?}",
         storage_calls_in_loops,
         signal.max_nesting_depth,
         loop_types_with_calls
-    );
-
-    signal.confidence = Some(FindingConfidence {
-        level: confidence_level,
-        rationale: confidence_rationale,
-    });
-
-    signal.context = Some(FindingContext {
-        control_flow_info: Some(ControlFlowContext {
-            loop_types: signal.loop_types.clone(),
-            block_types: vec!["block".to_string()],
-            conditional_branches,
-        }),
-        storage_call_pattern: Some(StorageCallPattern {
-            calls_in_loops: storage_calls_in_loops,
-            calls_outside_loops: storage_calls_outside_loops,
-            loop_types_with_calls: loop_types_with_calls.into_iter().collect(),
-        }),
-        loop_nesting_depth: Some(signal.max_nesting_depth),
-    });
+    ));
+    let _ = conditional_branches;
+    let _ = storage_calls_outside_loops;
+    let _ = loop_types_with_calls;
+    signal.confidence = Some(confidence);
 
     signal.suspicious = storage_calls_in_loops > 0;
     signal

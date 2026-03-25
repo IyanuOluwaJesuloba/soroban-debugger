@@ -221,6 +221,9 @@ impl DebugServer {
                     success: true,
                     message: "Already authenticated".to_string(),
                 },
+                DebugRequest::Handshake { .. } => DebugResponse::Error {
+                    message: "Protocol handshake already completed".to_string(),
+                },
                 DebugRequest::LoadContract { contract_path } => match fs::read(&contract_path) {
                     Ok(bytes) => {
                         match crate::runtime::executor::ContractExecutor::new(bytes.clone()) {
@@ -287,7 +290,7 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::StepIn => match self.engine.as_mut() {
+                DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
                             let (current_function, step_count) = engine
@@ -402,50 +405,6 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::Continue => match self.engine.as_mut() {
-                    Some(engine) => {
-                        if let Some(pending) = self.pending_execution.take() {
-                            match engine.execute_without_breakpoints(
-                                &pending.function,
-                                pending.args.as_deref(),
-                            ) {
-                                Ok(output) => DebugResponse::ContinueResult {
-                                    completed: true,
-                                    output: Some(output),
-                                    error: None,
-                                    paused: false,
-                                    source_location: None,
-                                },
-                                Err(e) => DebugResponse::ContinueResult {
-                                    completed: false,
-                                    output: None,
-                                    error: Some(e.to_string()),
-                                    paused: false,
-                                    source_location: None,
-                                },
-                            }
-                        } else {
-                            match engine.continue_execution() {
-                                Ok(_) => DebugResponse::ContinueResult {
-                                    completed: true,
-                                    output: None,
-                                    error: None,
-                                    paused: engine.is_paused(),
-                                    source_location: None,
-                                },
-                                Err(e) => DebugResponse::ContinueResult {
-                                    completed: false,
-                                    output: None,
-                                    error: Some(e.to_string()),
-                                    paused: engine.is_paused(),
-                                    source_location: None,
-                                },
-                            }
-                        }
-                    }
-                }
-            }
-
                 DebugRequest::StepOverLine => match self.engine.as_mut() {
                     Some(engine) => match engine.step_over_source_line() {
                         Ok(StepOverResult { paused, location }) => {
@@ -641,7 +600,7 @@ impl DebugServer {
                             None => None,
                         };
 
-                        engine.breakpoints_mut().add(BreakpointSpec {
+                        engine.breakpoints_mut().add_spec(BreakpointSpec {
                             id: id.clone(),
                             function: function.clone(),
                             condition,
@@ -656,7 +615,7 @@ impl DebugServer {
                 },
                 DebugRequest::ClearBreakpoint { id } => match self.engine.as_mut() {
                     Some(engine) => {
-                        engine.breakpoints_mut().remove(&id);
+                        engine.breakpoints_mut().remove_by_id(&id);
                         DebugResponse::BreakpointCleared { id }
                     }
                     None => DebugResponse::Error {
@@ -670,11 +629,11 @@ impl DebugServer {
                             .list_detailed()
                             .into_iter()
                             .map(|breakpoint| BreakpointDescriptor {
-                                id: breakpoint.id,
-                                function: breakpoint.function,
-                                condition: breakpoint.condition,
-                                hit_condition: breakpoint.hit_condition,
-                                log_message: breakpoint.log_message,
+                                id: breakpoint.id.clone(),
+                                function: breakpoint.function.clone(),
+                                condition: breakpoint.condition.clone(),
+                                hit_condition: breakpoint.hit_condition.clone(),
+                                log_message: breakpoint.log_message.clone(),
                             })
                             .collect(),
                     },
@@ -844,17 +803,7 @@ fn execute_without_breakpoints(
 }
 
 fn current_storage(engine: &DebuggerEngine) -> Result<std::collections::HashMap<String, String>> {
-    let snapshot = engine.executor().get_storage_snapshot()?;
-    Ok(snapshot
-        .into_iter()
-        .map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::String(value) => value,
-                other => other.to_string(),
-            };
-            (key, value)
-        })
-        .collect())
+    engine.executor().get_storage_snapshot()
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {

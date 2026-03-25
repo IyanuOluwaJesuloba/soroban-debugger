@@ -47,8 +47,6 @@ impl ReplExecutor {
                 loaded.format_summary(),
                 crate::logging::LogLevel::Info,
             );
-            executor.apply_snapshot_ledger(&loaded)?;
-            crate::logging::log_display(loaded.format_summary(), crate::logging::LogLevel::Info);
         }
 
         if let Some(storage_json) = &config.storage {
@@ -72,7 +70,7 @@ impl ReplExecutor {
         };
 
         // Check if we should break before starting
-        if self.engine.breakpoints().should_break(function, 0, args_ref) {
+        if self.engine.breakpoints().should_break(function) {
             self.engine.prepare_breakpoint_stop(function, args_ref);
             crate::logging::log_display(
                 format!("Execution paused at function: {}", function),
@@ -197,11 +195,26 @@ impl ReplExecutor {
         Ok(())
     }
     pub fn add_breakpoint(&mut self, function: &str, condition: Option<&str>) -> Result<()> {
-        self.engine.breakpoints_mut().add(function, condition)
+        if let Some(condition) = condition {
+            self.engine
+                .breakpoints_mut()
+                .set(crate::debugger::breakpoint::Breakpoint::with_condition(
+                    function.to_string(),
+                    condition.to_string(),
+                ));
+        } else {
+            self.engine.breakpoints_mut().add(function);
+        }
+        Ok(())
     }
 
     pub fn list_breakpoints(&self) -> Vec<crate::debugger::breakpoint::Breakpoint> {
-        self.engine.breakpoints().list_detailed()
+        self.engine
+            .breakpoints()
+            .list_detailed()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     pub fn remove_breakpoint(&mut self, function: &str) -> bool {

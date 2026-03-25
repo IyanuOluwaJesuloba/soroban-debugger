@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 /// Represents a single breakpoint with optional conditions and logging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Breakpoint {
+    /// Client-visible breakpoint id.
+    pub id: String,
     /// Function name where the breakpoint is set
     pub function: String,
     /// Optional condition expression (e.g., "balance > 1000")
@@ -20,6 +22,7 @@ impl Breakpoint {
     /// Create a simple breakpoint without conditions
     pub fn simple(function: String) -> Self {
         Self {
+            id: function.clone(),
             function,
             condition: None,
             hit_condition: None,
@@ -31,6 +34,7 @@ impl Breakpoint {
     /// Create a breakpoint with a condition
     pub fn with_condition(function: String, condition: String) -> Self {
         Self {
+            id: function.clone(),
             function,
             condition: Some(condition),
             hit_condition: None,
@@ -42,6 +46,7 @@ impl Breakpoint {
     /// Create a breakpoint with a hit condition
     pub fn with_hit_condition(function: String, hit_condition: String) -> Self {
         Self {
+            id: function.clone(),
             function,
             condition: None,
             hit_condition: Some(hit_condition),
@@ -53,6 +58,7 @@ impl Breakpoint {
     /// Create a log point (breakpoint that doesn't pause, just logs)
     pub fn log_point(function: String, log_message: String) -> Self {
         Self {
+            id: function.clone(),
             function,
             condition: None,
             hit_condition: None,
@@ -70,6 +76,21 @@ impl Breakpoint {
     pub fn is_log_point(&self) -> bool {
         self.log_message.is_some()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BreakpointSpec {
+    pub id: String,
+    pub function: String,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+    pub log_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BreakpointHit {
+    pub should_pause: bool,
+    pub log_messages: Vec<String>,
 }
 
 /// Manages breakpoints during debugging
@@ -95,14 +116,49 @@ impl BreakpointManager {
         self.set(Breakpoint::simple(function.to_string()));
     }
 
+    pub fn add_simple(&mut self, function: &str) {
+        self.add(function);
+    }
+
+    pub fn add_spec(&mut self, spec: BreakpointSpec) {
+        self.set(Breakpoint {
+            id: spec.id,
+            function: spec.function,
+            condition: spec.condition,
+            hit_condition: spec.hit_condition,
+            log_message: spec.log_message,
+            hit_count: 0,
+        });
+    }
+
     /// Remove a breakpoint
     pub fn remove(&mut self, function: &str) -> bool {
         self.breakpoints.remove(function).is_some()
     }
 
+    pub fn remove_function(&mut self, function: &str) -> bool {
+        self.remove(function)
+    }
+
+    pub fn remove_by_id(&mut self, id: &str) -> bool {
+        let key = self
+            .breakpoints
+            .iter()
+            .find_map(|(function, breakpoint)| (breakpoint.id == id).then(|| function.clone()));
+        if let Some(function) = key {
+            self.breakpoints.remove(&function).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Get a breakpoint by function name
     pub fn get(&self, function: &str) -> Option<&Breakpoint> {
         self.breakpoints.get(function)
+    }
+
+    pub fn get_breakpoint(&self, function: &str) -> Option<&Breakpoint> {
+        self.get(function)
     }
 
     /// Get a mutable breakpoint by function name
@@ -163,6 +219,31 @@ impl BreakpointManager {
     /// Get all breakpoints with full details
     pub fn list_detailed(&self) -> Vec<&Breakpoint> {
         self.breakpoints.values().collect()
+    }
+
+    pub fn on_hit(
+        &mut self,
+        function: &str,
+        _storage: &HashMap<String, String>,
+        _args: Option<&str>,
+    ) -> crate::Result<Option<BreakpointHit>> {
+        let Some(bp) = self.breakpoints.get_mut(function) else {
+            return Ok(None);
+        };
+
+        bp.increment_hit();
+
+        if let Some(hit_cond) = &bp.hit_condition {
+            if !evaluate_hit_condition(hit_cond, bp.hit_count)? {
+                return Ok(None);
+            }
+        }
+
+        let log_messages = bp.log_message.clone().into_iter().collect();
+        Ok(Some(BreakpointHit {
+            should_pause: !bp.is_log_point(),
+            log_messages,
+        }))
     }
 
     /// Clear all breakpoints

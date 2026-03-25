@@ -167,7 +167,11 @@ impl DebuggerUI {
                     );
                 } else {
                     for bp in breakpoints {
-                        let cond_str = bp.condition.map(|c| format!(" (if {:?})", c)).unwrap_or_default();
+                        let cond_str = bp
+                            .condition
+                            .clone()
+                            .map(|c| format!(" (if {:?})", c))
+                            .unwrap_or_default();
                         crate::logging::log_display(
                             format!("- {}{}", bp.function, cond_str),
                             crate::logging::LogLevel::Info,

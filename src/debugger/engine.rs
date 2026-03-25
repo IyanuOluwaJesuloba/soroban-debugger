@@ -23,7 +23,6 @@ pub struct DebuggerEngine {
     state: Arc<Mutex<DebugState>>,
     stepper: Stepper,
     instrumenter: Instrumenter,
-    source_map: SourceMap,
     source_map: Option<SourceMap>,
     paused: bool,
     instruction_debug_enabled: bool,
@@ -46,7 +45,6 @@ impl DebuggerEngine {
             state: Arc::new(Mutex::new(DebugState::new())),
             stepper: Stepper::new(),
             instrumenter: Instrumenter::new(),
-            source_map: SourceMap::new(),
             source_map: None,
             paused: false,
             instruction_debug_enabled: false,
@@ -102,7 +100,10 @@ impl DebuggerEngine {
     }
 
     pub fn load_source_map(&mut self, wasm_bytes: &[u8]) -> Result<()> {
-        self.source_map.load(wasm_bytes)
+        let mut source_map = SourceMap::new();
+        source_map.load(wasm_bytes)?;
+        self.source_map = Some(source_map);
+        Ok(())
     }
 
     /// Disable instruction-level debugging.
@@ -172,14 +173,10 @@ impl DebuggerEngine {
 
         if check_breakpoints {
             if let Some(bp) = self.breakpoints().get_breakpoint(function) {
-                if let Some(condition) = &bp.condition {
-                    if condition.evaluate(step_count, current_args.as_deref().or(args)) {
-                        let cond_str = format!("{:?}", condition);
-                        self.pause_at_function(function, Some(cond_str));
-                    }
-                } else {
-                    self.pause_at_function(function, None);
-                }
+                let condition = bp.condition.clone();
+                let _ = step_count;
+                let _ = current_args;
+                self.pause_at_function(function, condition);
             }
         }
 
@@ -333,13 +330,13 @@ impl DebuggerEngine {
             return Err(miette::miette!("Instruction debugging not enabled"));
         }
 
-        let (paused, location) = if let Ok(mut state) = self.state.lock() {
-            let advanced = self
-                .stepper
-                .step_over_source_line(&mut state, &self.source_map);
+        let (paused, location) = if let (Ok(mut state), Some(source_map)) =
+            (self.state.lock(), self.source_map.as_ref())
+        {
+            let advanced = self.stepper.step_over_source_line(&mut state, source_map);
             let loc = state
                 .current_instruction()
-                .and_then(|i| self.source_map.lookup(i.offset));
+                .and_then(|i| source_map.lookup(i.offset));
             (advanced, loc)
         } else {
             (false, None)

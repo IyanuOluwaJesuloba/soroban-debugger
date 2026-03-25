@@ -97,11 +97,6 @@ pub struct DynamicTraceEvent {
     pub call_depth: Option<usize>,
     pub storage_key: Option<String>,
     pub storage_value: Option<String>,
-    /// Call-frame depth at the time this event was emitted (0 = top-level).
-    /// Used by reentrancy analysis to correlate writes with the frame that
-    /// issued the cross-contract call.
-    #[serde(default)]
-    pub call_depth: u32,
 }
 
 /// Source location information (file, line, column)
